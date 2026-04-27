@@ -31,7 +31,7 @@ USE_PSEUDO_GPS_VEL = true;
 % false:
 %   q0 identity alınır.
 %   Gerçek sisteme daha yakın ama yaw başlangıcı bilinmezse sonuç bozulabilir.
-USE_TRUTH_ATT_INIT_FOR_DEBUG = true;
+USE_TRUTH_ATT_INIT_FOR_DEBUG = false;
 
 % Initial velocity:
 % true:
@@ -39,7 +39,7 @@ USE_TRUTH_ATT_INIT_FOR_DEBUG = true;
 %
 % false:
 %   v0 = [0;0;0]
-USE_PSEUDO_GPS_VEL_INIT = true;
+USE_PSEUDO_GPS_VEL_INIT = false;
 
 fprintf('[main raw] Raw gerçek veri modu: %s yükleniyor...\n', real_data_file);
 
@@ -48,34 +48,101 @@ fprintf('[main raw] Raw gerçek veri modu: %s yükleniyor...\n', real_data_file)
 % ============================================================
 [state, P, params] = init_filter();
 
-% ENU convention:
-% p = [E; N; U]
-% gravity is down in ENU
-params.g_n = [0; 0; -9.81];
-
 %% ============================================================
-% 2) Measurement covariance tuning
+% 1.5) MRS MAS DATASET SENSOR-INFORMED TUNING
+% ============================================================
+% Dataset:
+%   /pixhawk_imu      -> Pixhawk4-class MEMS IMU
+%   /pixhawk_baro     -> Pixhawk4/MS5611-class barometer pressure
+%   /rtk_raw          -> Emlid Reach RTK LLA, converted to ENU
+%   /rtk_fused_odom   -> reference only, NOT used as measurement
+%
+% Notes:
+%   - These are NOT bias truth values.
+%   - These are EKF noise/covariance tuning values.
+%   - Datasheet values are too optimistic for a real UAV flight log because
+%     vibration, mounting, timestamp mismatch and reference mismatch dominate.
 % ============================================================
 
-% Raw RTK/GPS position'a daha fazla güven.
-% Önceki testte GPS güveni artırınca position error düştü.
-params.sigma_gps_pos = [0.4; 0.4; 0.6];
+params.sensor_profile = 'MRS MAS Rectangle: Pixhawk4 IMU + MS5611 baro + Emlid Reach RTK';
+
+%% ---------------- Frame convention ----------------
+% ENU convention:
+% p = [E; N; U]
+% gravity points downward
+params.g_n = [0; 0; -9.81];
+
+%% ---------------- IMU process noise ----------------
+% Pixhawk-class MEMS IMU için muhafazakar uçuş-pratik değerler.
+% compute_F_G_Qd bu değerleri continuous noise gibi kullanıyor.
+
+params.sigma_g = deg2rad(0.20);      % gyro noise [rad/s/sqrt(Hz)-like]
+params.sigma_a = 0.060;              % accel noise [m/s^2/sqrt(Hz)-like]
+
+% Bias random walk.
+% Bias state EKF içinde estimate ediliyor, ama bias truth yok.
+% Bu değerler bias'ın yavaşça adapte olmasına izin verir.
+params.sigma_bg_rw = deg2rad(0.010); % gyro bias RW [rad/s/sqrt(s)-like]
+params.sigma_ba_rw = 0.008;          % accel bias RW [m/s^2/sqrt(s)-like]
+
+%% ---------------- Raw RTK/GPS position measurement ----------------
+% /rtk_raw LLA -> local ENU.
+% RTK idealde cm seviyesinde olabilir ama burada /rtk_fused_odom ile
+% kıyas, zaman hizalama, frame farkı ve conversion etkileri de var.
+
+params.sigma_gps_pos = [0.40; 0.40; 0.60];   % [E; N; U] [m]
 params.R_gps_pos = diag(params.sigma_gps_pos.^2);
 
-% Pseudo GPS velocity, gerçek Doppler velocity değil.
-% Raw GPS position türevinden geldiği için fazla güvenme.
-% Eğer velocity update sistemi titretirse bunları büyüt:
-%   [0.7; 0.7; 1.2]
-params.sigma_gps_vel = [0.45; 0.45; 0.90];
+%% ---------------- Pseudo GPS velocity measurement ----------------
+% /rtk_raw doğrudan velocity sağlamıyor.
+% sim.gps_vel, smoothed GPS ENU position türevinden geliyor.
+% Bu yüzden Doppler velocity gibi fazla güvenme.
+
+params.sigma_gps_vel = [0.45; 0.45; 0.90];   % [vE; vN; vU] [m/s]
 params.R_gps_vel = diag(params.sigma_gps_vel.^2);
 
-% Baro güveni azaltıldı.
-% RTK altitude daha iyi göründüğü için baro sadece zayıf yardımcı olacak.
-params.sigma_baro = 3.0;
+%% ---------------- Barometer measurement ----------------
+% MS5611-class baro idealde hassas olsa bile uçuşta pressure disturbance,
+% offset ve drift büyüyor. Rectangle testinde sigma_baro = 3.0 en iyi
+% mean position error veren ayarlardan biri oldu.
+
+params.sigma_baro = 3.0;                     % [m]
 params.R_baro = params.sigma_baro^2;
 
+%% ---------------- Initial covariance P0 ----------------
+idx_p  = 1:3;
+idx_v  = 4:6;
+idx_th = 7:9;
+idx_bg = 10:12;
+idx_ba = 13:15;
+
+% Position first RTK/GPS sample'dan başlatılıyor.
+sigma_p0 = [0.50; 0.50; 0.80];               % [m]
+
+% Velocity pseudo GPS velocity varsa ondan başlatılacak.
+sigma_v0 = [0.35; 0.35; 0.60];               % [m/s]
+
+% Attitude debug modda reference q0 ile başlıyor.
+% Gerçekçi q0 identity denenirse yaw uncertainty büyük olmalı.
+if USE_TRUTH_ATT_INIT_FOR_DEBUG
+    sigma_th0 = deg2rad([0.5; 0.5; 2.0]);    % roll, pitch, yaw [rad]
+else
+    sigma_th0 = deg2rad([3.0; 3.0; 30.0]);   % real-like unknown yaw
+end
+
+% Bias zero başlıyor ama kesin zero demiyoruz.
+% EKF measurement residual'larından bias estimate edebilsin diye açık bırakıyoruz.
+sigma_bg0 = deg2rad([0.50; 0.50; 0.80]);     % [rad/s]
+sigma_ba0 = [0.20; 0.20; 0.30];              % [m/s^2]
+
+P(idx_p,  idx_p)  = diag(sigma_p0.^2);
+P(idx_v,  idx_v)  = diag(sigma_v0.^2);
+P(idx_th, idx_th) = diag(sigma_th0.^2);
+P(idx_bg, idx_bg) = diag(sigma_bg0.^2);
+P(idx_ba, idx_ba) = diag(sigma_ba0.^2);
+
 %% ============================================================
-% 3) Build sim from raw MAT
+% 2) Build sim from raw MAT
 % ============================================================
 sim = build_sim_from_raw_mat(real_data_file);
 
@@ -84,7 +151,7 @@ dt = sim.dt;
 N = numel(t);
 
 %% ============================================================
-% 4) Start index
+% 3) Start index
 % ============================================================
 % Şimdilik baştan başlıyoruz.
 % İleride gerçek sistem için pre-launch/static detection buraya eklenebilir.
@@ -93,7 +160,7 @@ k_start = 1;
 fprintf('[main raw] Başlangıç indeksi: k_start = %d\n', k_start);
 
 %% ============================================================
-% 5) Trim sim if needed
+% 4) Trim sim if needed
 % ============================================================
 if k_start > 1
     t_offset = sim.t(k_start);
@@ -125,10 +192,10 @@ dt = sim.dt;
 N = numel(t);
 
 %% ============================================================
-% 6) Initial state
+% 5) Initial state
 % ============================================================
 
-% ---------------- Position init ----------------
+%% ---------------- Position init ----------------
 % İlk raw GPS/RTK ölçümünden başlat.
 idx_gps0 = find(sim.gps_pos_available & all(isfinite(sim.gps_pos),1), 1, 'first');
 
@@ -139,7 +206,7 @@ else
     state.p_n = sim.gps_pos(:,idx_gps0);
 end
 
-% ---------------- Velocity init ----------------
+%% ---------------- Velocity init ----------------
 idx_gps_vel0 = find(sim.gps_vel_available & all(isfinite(sim.gps_vel),1), 1, 'first');
 
 if USE_PSEUDO_GPS_VEL_INIT && ~isempty(idx_gps_vel0)
@@ -150,7 +217,7 @@ else
     fprintf('[main raw] Initial velocity v0 = [0;0;0] seçildi.\n');
 end
 
-% ---------------- Attitude init ----------------
+%% ---------------- Attitude init ----------------
 if USE_TRUTH_ATT_INIT_FOR_DEBUG
     state.q_nb = sim.q_true(:,1);
     state.q_nb = state.q_nb / norm(state.q_nb);
@@ -160,17 +227,25 @@ else
     fprintf('[main raw] REAL-LIKE: attitude q0 identity seçildi. Yaw sapması beklenebilir.\n');
 end
 
-% ---------------- Bias init ----------------
+%% ---------------- Bias init ----------------
+% Gerçek dataset bias truth veya bias measurement vermez.
+% Bias zero başlatılır, EKF içinde state olarak estimate edilir.
 state.b_g = [0;0;0];
 state.b_a = [0;0;0];
 
+fprintf('[main raw] Bias init zero kullanıldı.\n');
+
 fprintf('[main raw] Initial p = [%.3f %.3f %.3f]^T m\n', state.p_n);
 fprintf('[main raw] Initial v = [%.3f %.3f %.3f]^T m/s\n', state.v_n);
+fprintf('[main raw] Initial bg = [%.6f %.6f %.6f]^T rad/s\n', state.b_g);
+fprintf('[main raw] Initial ba = [%.6f %.6f %.6f]^T m/s^2\n', state.b_a);
+
 fprintf('[main raw] USE_BARO = %d\n', USE_BARO);
 fprintf('[main raw] USE_PSEUDO_GPS_VEL = %d\n', USE_PSEUDO_GPS_VEL);
+fprintf('[main raw] USE_TRUTH_ATT_INIT_FOR_DEBUG = %d\n', USE_TRUTH_ATT_INIT_FOR_DEBUG);
 
 %% ============================================================
-% 7) Logs
+% 6) Logs
 % ============================================================
 log_p = zeros(3, N);
 log_v = zeros(3, N);
@@ -188,7 +263,7 @@ used_gps_vel_updates = 0;
 used_baro_updates = 0;
 
 %% ============================================================
-% 8) Main ESKF loop
+% 7) Main ESKF loop
 % ============================================================
 for k = 1:N
 
@@ -249,13 +324,13 @@ for k = 1:N
 end
 
 %% ============================================================
-% 9) Plot results
+% 8) Plot results
 % ============================================================
 plot_results_raw(sim, t, log_p, log_v, log_q, log_bg, log_ba, log_Pdiag, ...
     log_res_gps_pos, log_res_gps_vel, log_res_baro, params);
 
 %% ============================================================
-% 10) Error metrics
+% 9) Error metrics
 % ============================================================
 err_p = log_p - sim.p_true;
 err_v = log_v - sim.v_true;
@@ -300,6 +375,7 @@ fprintf('Max  baro residual abs [m]        : %.4f\n', max(abs(log_res_baro), [],
 fprintf('\n--- FINAL STATES ---\n');
 fprintf('Final estimated p [m]     : [%.4f %.4f %.4f]^T\n', log_p(:,end));
 fprintf('Final truth p [m]         : [%.4f %.4f %.4f]^T\n', sim.p_true(:,end));
+
 fprintf('Final estimated v [m/s]   : [%.4f %.4f %.4f]^T\n', log_v(:,end));
 fprintf('Final truth v [m/s]       : [%.4f %.4f %.4f]^T\n', sim.v_true(:,end));
 
@@ -307,9 +383,15 @@ fprintf('Final gyro bias [rad/s]   : [%.6f %.6f %.6f]^T\n', log_bg(:,end));
 fprintf('Final accel bias [m/s^2]  : [%.6f %.6f %.6f]^T\n', log_ba(:,end));
 
 fprintf('\n--- CONFIG USED ---\n');
+fprintf('Sensor profile             : %s\n', params.sensor_profile);
 fprintf('USE_BARO                  : %d\n', USE_BARO);
 fprintf('USE_PSEUDO_GPS_VEL        : %d\n', USE_PSEUDO_GPS_VEL);
 fprintf('USE_TRUTH_ATT_INIT_DEBUG  : %d\n', USE_TRUTH_ATT_INIT_FOR_DEBUG);
+
+fprintf('sigma_g [rad/s/sqrtHz]    : %.6f\n', params.sigma_g);
+fprintf('sigma_a [m/s2/sqrtHz]     : %.6f\n', params.sigma_a);
+fprintf('sigma_bg_rw               : %.8f\n', params.sigma_bg_rw);
+fprintf('sigma_ba_rw               : %.8f\n', params.sigma_ba_rw);
 
 fprintf('sigma_gps_pos             : [%.3f %.3f %.3f]\n', params.sigma_gps_pos);
 fprintf('sigma_gps_vel             : [%.3f %.3f %.3f]\n', params.sigma_gps_vel);
