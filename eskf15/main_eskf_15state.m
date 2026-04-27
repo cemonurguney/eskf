@@ -18,7 +18,7 @@
     clear; clc; close all;
 
     %% 0) Veri kaynagi anahtari
-    use_real_data  = true;
+    use_real_data  = false;
     real_data_file = "rectangle_clean.mat";
 
     %% 1) Filtreyi baslat
@@ -89,7 +89,6 @@
         sim.gps_vel_available = sim.gps_vel_available(k_start:end);
         sim.baro              = sim.baro(k_start:end);
         sim.baro_available    = sim.baro_available(k_start:end);
-        sim.baro_gecerli =false;
         if isfield(sim,'range')
             sim.range           = sim.range(k_start:end);
             sim.range_available = sim.range_available(k_start:end);
@@ -150,7 +149,7 @@
         end
 
         % Baro update
-        if sim.baro_available(k) & sim.baro_gecerli
+        if sim.baro_available(k)
             z_baro = sim.baro(k);
             [state, P, residual, ~, ~] = update_baro(state, P, z_baro, params);
             log_res_baro(k) = residual;
