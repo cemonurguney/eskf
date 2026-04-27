@@ -95,7 +95,27 @@ function sim = build_sim_from_raw_mat(filename)
     %% 6) Truth/reference interpolation to IMU timeline
     % Truth sadece kıyas için kullanılır, filtreye measurement olarak verilmez.
     sim.p_true = interp1(t_truth', p_truth', t, 'linear', 'extrap')';
-    sim.v_true = interp1(t_truth', v_truth', t, 'linear', 'extrap')';
+
+    % Truth velocity için odometry twist'e güvenmek yerine
+    % truth position türevinden ENU velocity üret.
+    % Böylece log_v ile aynı frame'de kıyas yaparız.
+    p_true_smooth = sim.p_true;
+    
+    truth_vel_win = 11;  % 100 Hz truth için yaklaşık 0.11 s smoothing
+    
+    for ax = 1:3
+        p_true_smooth(ax,:) = movmean(sim.p_true(ax,:), truth_vel_win);
+    end
+    
+    sim.v_true = zeros(3, N);
+    
+    for ax = 1:3
+        sim.v_true(ax,:) = gradient(p_true_smooth(ax,:), t);
+    end
+    
+    % İstersen raw odom twist'i de sakla, kıyas için dursun.
+    sim.v_true_odom_twist = interp1(t_truth', v_truth', t, 'linear', 'extrap')';
+    sim.v_true_source = 'finite difference of p_truth_rel in ENU';
 
     q_interp = interp1(t_truth', q_truth', t, 'linear', 'extrap')';
 
