@@ -30,7 +30,7 @@ function [state, P, params] = init_filter()
     %% =========================================================
     % 4) ÖLÇÜM GÜRÜLTÜ KABULLERİ
     % ==========================================================
-    params.sigma_gps_pos = [0.8; 0.8; 1.2];
+    params.sigma_gps_pos = [0.2; 0.2; 0.4];
     params.sigma_gps_vel = [0.08; 0.08; 0.12];
     params.sigma_baro    = 0.6;
 
