@@ -1,93 +1,70 @@
-function [state, P, residual, K, dx_hat] = update_baro(state, P, z_baro, params)
+function [state, P, residual, S, K] = update_baro(state, P, z_baro, params)
 %UPDATE_BARO
-% Barometre yükseklik/irtifa ölçümü ile error-state EKF update yapar.
+% Barometer update for 16-state ESKF with estimated barometer offset.
 %
-% Girdi:
-%   state  : nominal state struct
-%   P      : 15x15 error-state covariance
-%   z_baro : 1x1 veya scalar baro ölçümü
-%   params : filtre parametreleri (R_baro ve joseph form ayarı içerir)
+% Measurement model:
+%   z_baro = p_D + b_baro + noise
 %
-% Çıktı:
-%   state    : update edilmiş nominal state
-%   P        : update edilmiş covariance
-%   residual : scalar innovation / residual
-%   K        : 15x1 Kalman gain
-%   dx_hat   : 15x1 error-state correction
+% Error-state:
+%   dx = [dp; dv; dtheta; dbg; dba; db_baro]
 %
-% Ölçüm modeli:
-%   z = p_D + noise
-%
-% Error-state lineer hali:
-%   r = z - p_D_nom ≈ H * delta_x + noise
-%
-% Burada:
-%   H = [0 0 1 0 0 0 0 0 0 0 0 0 0 0 0]
+% H:
+%   H(3)  = 1   -> Down position
+%   H(16) = 1   -> barometer offset
 %
 % Not:
-% Bu model, baro ölçümünün NED "Down" ekseni ile uyumlu hale getirildiğini varsayar.
-% Eğer elindeki baro "yükseklik yukarı pozitif" veriyorsa, işaret dönüşümünü
-% bu fonksiyona gelmeden önce yapman gerekir.
+%   Bu model NED fixed-wing için p_n(3)=Down varsayımıyla kullanılır.
+%   ENU modunda baro modelini ayrı düşünmek gerekir, yoksa eksenler yine
+%   insanlığın üstüne kapanır.
 
-    %% =========================================================
-    % 1) Giriş düzenleme
-    % ==========================================================
-    z_baro = z_baro(1);
-
-    if ~isequal(size(P), [15 15])
-        error('P matrisi 15x15 olmalıdır.');
+    %% Boyut kontrolleri
+    if ~isequal(size(P), [16 16])
+        error('P 16x16 olmalıdır.');
     end
 
-    %% =========================================================
-    % 2) Beklenen ölçüm ve residual
-    % ==========================================================
-    % Baro sadece nominal position'ın down bileşenini görüyor
-    z_hat = state.p_n(3);        % p_D_nom
-    residual = z_baro - z_hat;   % scalar residual
+    if ~isscalar(z_baro) || ~isfinite(z_baro)
+        error('z_baro sonlu scalar olmalıdır.');
+    end
 
-    %% =========================================================
-    % 3) H matrisi
-    % ==========================================================
-    % Error-state sırası:
-    % [dp_N dp_E dp_D dv_N dv_E dv_D dthx dthy dthz dbgx dbgy dbgz dbax dbay dbaz]
-    %
-    % Baro yalnızca delta p_D bloğunu doğrudan görür.
-    H = zeros(1,15);
-    H(3) = 1;
+    if ~isfield(state, 'b_baro') || isempty(state.b_baro)
+        state.b_baro = 0;
+    end
 
-    %% =========================================================
-    % 4) Innovation covariance
-    % ==========================================================
-    S = H * P * H.' + params.R_baro;   % scalar
+    %% Measurement prediction
+    z_hat = state.p_n(3) + state.b_baro;
 
-    %% =========================================================
-    % 5) Kalman gain
-    % ==========================================================
-    K = P * H.' / S;                   % 15x1
+    residual = z_baro - z_hat;
 
-    %% =========================================================
-    % 6) Error-state düzeltmesi
-    % ==========================================================
-    dx_hat = K * residual;             % 15x1
+    %% Measurement Jacobian
+    H = zeros(1,16);
+    H(3)  = 1;
+    H(16) = 1;
 
-    %% =========================================================
-    % 7) Nominal state'e uygula
-    % ==========================================================
+    %% Measurement covariance
+    if isfield(params, 'R_baro')
+        R = params.R_baro;
+    elseif isfield(params, 'sigma_baro')
+        R = params.sigma_baro^2;
+    else
+        R = 1.8^2;
+    end
+
+    %% Kalman update
+    S = H * P * H.' + R;
+    K = P * H.' / S;
+
+    dx_hat = K * residual;
+
     state = inject_error_state(state, dx_hat);
 
-    %% =========================================================
-    % 8) Covariance update
-    % ==========================================================
-    I15 = eye(15);
+    %% Covariance update
+    I = eye(16);
 
     if isfield(params, 'use_joseph_form') && params.use_joseph_form
-        A = I15 - K * H;
-        P = A * P * A.' + K * params.R_baro * K.';
+        P = (I - K*H) * P * (I - K*H).' + K * R * K.';
     else
-        P = (I15 - K * H) * P;
+        P = (I - K*H) * P;
     end
 
-    % Sayısal simetri koruması
     P = 0.5 * (P + P.');
-
 end

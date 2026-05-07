@@ -1,94 +1,67 @@
-function [state, P, residual, K, dx_hat] = update_gnss_pos(state, P, z_gps_pos, params)
+function [state, P, residual, S, K] = update_gnss_pos(state, P, z_gps_pos, params)
 %UPDATE_GNSS_POS
-% GNSS konum ölçümü ile error-state EKF update yapar.
+% GNSS position update for 16-state ESKF.
 %
-% Girdi:
-%   state     : nominal state struct
-%   P         : 15x15 error-state covariance
-%   z_gps_pos : 3x1 GNSS NED position measurement [m]
-%   params    : filtre parametreleri (R_gps_pos ve joseph form ayarı içerir)
+% Measurement model:
+%   z_gps_pos = p_n + noise
 %
-% Çıktı:
-%   state     : update edilmiş nominal state
-%   P         : update edilmiş covariance
-%   residual  : 3x1 innovation / residual
-%   K         : 15x3 Kalman gain
-%   dx_hat    : 15x1 error-state correction
+% Error-state:
+%   dx = [dp; dv; dtheta; dbg; dba; db_baro]
 %
-% Ölçüm modeli:
-%   z = p_n + v
+% H:
+%   H(:,1:3) = I3
 %
-% Error-state lineer hali:
-%   r = z - p_nom ≈ H * delta_x + v
-%
-% Burada:
-%   H = [I 0 0 0 0]
+% Baro offset state bu ölçümde direkt gözlenmez, bu yüzden H(:,16)=0.
 
-    %% =========================================================
-    % 1) Boyut kontrolleri
-    % ==========================================================
+    %% Boyut kontrolleri
+    if ~isequal(size(P), [16 16])
+        error('P 16x16 olmalıdır.');
+    end
+
+    if ~isvector(z_gps_pos) || numel(z_gps_pos) ~= 3
+        error('z_gps_pos 3 elemanlı olmalıdır.');
+    end
+
     z_gps_pos = z_gps_pos(:);
 
-    if numel(z_gps_pos) ~= 3
-        error('z_gps_pos, 3x1 GNSS position measurement olmalıdır.');
+    if any(~isfinite(z_gps_pos))
+        error('z_gps_pos sonlu değerlerden oluşmalıdır.');
     end
 
-    if ~isequal(size(P), [15 15])
-        error('P matrisi 15x15 olmalıdır.');
-    end
+    %% Measurement prediction
+    z_hat = state.p_n;
 
-    %% =========================================================
-    % 2) Beklenen ölçüm ve residual
-    % ==========================================================
-    % GNSS position doğrudan nominal konumu ölçüyor kabul ediliyor
-    z_hat = state.p_n;                 % h(x_nom)
-    residual = z_gps_pos - z_hat;      % innovation
+    residual = z_gps_pos - z_hat;
 
-    %% =========================================================
-    % 3) H matrisi
-    % ==========================================================
-    % Error-state sırası:
-    % [dp dv dtheta dbg dba]
-    %
-    % GNSS position yalnızca delta p bloğunu doğrudan görür
-    H = zeros(3,15);
+    %% Measurement Jacobian
+    H = zeros(3,16);
     H(:,1:3) = eye(3);
 
-    %% =========================================================
-    % 4) Innovation covariance
-    % ==========================================================
-    S = H * P * H.' + params.R_gps_pos;
-
-    %% =========================================================
-    % 5) Kalman gain
-    % ==========================================================
-    K = P * H.' / S;
-
-    %% =========================================================
-    % 6) Error-state düzeltmesi
-    % ==========================================================
-    dx_hat = K * residual;
-
-    %% =========================================================
-    % 7) Nominal state'e uygula
-    % ==========================================================
-    state = inject_error_state(state, dx_hat);
-
-    %% =========================================================
-    % 8) Covariance update
-    % ==========================================================
-    I15 = eye(15);
-
-    if isfield(params, 'use_joseph_form') && params.use_joseph_form
-        % Joseph form daha numerik kararlı
-        A = I15 - K * H;
-        P = A * P * A.' + K * params.R_gps_pos * K.';
+    %% Measurement covariance
+    if isfield(params, 'R_gps_pos')
+        R = params.R_gps_pos;
+    elseif isfield(params, 'sigma_gps_pos')
+        R = diag(params.sigma_gps_pos(:).^2);
     else
-        % Klasik form
-        P = (I15 - K * H) * P;
+        R = diag([2.0; 2.0; 3.0].^2);
     end
 
-    % Sayısal simetri koruması
-    P = 0.5 * (P + P.');
+    %% Kalman update
+    S = H * P * H.' + R;
+    K = P * H.' / S;
 
+    dx_hat = K * residual;
+
+    state = inject_error_state(state, dx_hat);
+
+    %% Covariance update
+    I = eye(16);
+
+    if isfield(params, 'use_joseph_form') && params.use_joseph_form
+        P = (I - K*H) * P * (I - K*H).' + K * R * K.';
+    else
+        P = (I - K*H) * P;
+    end
+
+    P = 0.5 * (P + P.');
 end

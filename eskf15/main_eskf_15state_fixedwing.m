@@ -55,10 +55,27 @@ params.R_gps_pos = diag(params.sigma_gps_pos.^2);
 params.sigma_gps_vel = [0.50; 0.50; 0.80];
 params.R_gps_vel = diag(params.sigma_gps_vel.^2);
 
-% Baro offset state yok, manuel offset de yok.
-% O yüzden baroyu ilk testte kapalı tutuyoruz veya gevşek bağlıyoruz.
-params.sigma_baro = 6.0;
+%% 16-state barometer offset tuning
+% Baro offset artık 16. state olarak tahmin ediliyor.
+% Manuel offset uygulanmıyor.
+
+% Baro measurement noise.
+% Baseline'da offset çıkarılmadan baro std ~1.16 m görünüyordu.
+% O yüzden 1.8 m ile başlıyoruz, fazla agresif değil.
+params.sigma_baro = 1.8;
 params.R_baro = params.sigma_baro^2;
+
+% Barometer offset initial uncertainty.
+% Baseline'da yaklaşık +6.7 m offset bekliyoruz, 12 m rahat kapsar.
+params.sigma_baro_bias0 = 12.0;
+
+% Barometer offset random walk.
+% Offset sabit değil, yavaş değişebilen state olarak tahmin edilecek.
+params.sigma_baro_bias_rw = 0.01;   % [m/sqrt(s)]
+
+% Baro çok hızlı geliyor, hepsini kullanırsak filtre baroya yapışır.
+% İlk deneme için 10 Hz yeterli.
+params.max_baro_update_rate_hz = 10;
 
 params.use_joseph_form = true;
 
@@ -76,7 +93,7 @@ sim = build_sim_from_fixedwing_mat(fixedwing_file, t_start, t_end);
 t = sim.t;
 N = numel(t);
 
-fprintf("\n=== MAIN FIXED-WING ESKF ===\n");
+fprintf("\n=== MAIN FIXED-WING 16-STATE ESKF ===\n");
 fprintf("N = %d samples\n", N);
 fprintf("t range = %.3f to %.3f s\n", t(1), t(end));
 
@@ -115,10 +132,15 @@ end
 state.b_g = [0;0;0];
 state.b_a = [0;0;0];
 
+% 16th nominal state: estimated barometer Down-axis offset.
+% Sabit değer verilmiyor, filtre tahmin edecek.
+state.b_baro = 0;
+
 fprintf('[fixedwing main] Initial p = [%.3f %.3f %.3f]^T m\n', state.p_n);
 fprintf('[fixedwing main] Initial v = [%.3f %.3f %.3f]^T m/s\n', state.v_n);
 fprintf('[fixedwing main] Initial bg = [%.6f %.6f %.6f]^T rad/s\n', state.b_g);
 fprintf('[fixedwing main] Initial ba = [%.6f %.6f %.6f]^T m/s^2\n', state.b_a);
+fprintf('[fixedwing main] Initial b_baro = %.6f m\n', state.b_baro);
 fprintf('[fixedwing main] USE_BARO = %d\n', USE_BARO);
 fprintf('[fixedwing main] USE_GPS_VEL = %d\n', USE_GPS_VEL);
 fprintf('[fixedwing main] USE_ATT_INIT_FOR_DEBUG = %d\n', USE_ATT_INIT_FOR_DEBUG);
@@ -127,11 +149,12 @@ fprintf('[fixedwing main] USE_ATT_INIT_FOR_DEBUG = %d\n', USE_ATT_INIT_FOR_DEBUG
 % 4) Initial covariance
 % ============================================================
 
-idx_p  = 1:3;
-idx_v  = 4:6;
-idx_th = 7:9;
-idx_bg = 10:12;
-idx_ba = 13:15;
+idx_p      = 1:3;
+idx_v      = 4:6;
+idx_th     = 7:9;
+idx_bg     = 10:12;
+idx_ba     = 13:15;
+idx_bbaro  = 16;
 
 sigma_p0  = [3.0; 3.0; 5.0];
 sigma_v0  = [1.0; 1.0; 1.5];
@@ -145,12 +168,16 @@ end
 sigma_bg0 = deg2rad([0.5; 0.5; 0.8]);
 sigma_ba0 = [0.30; 0.30; 0.50];
 
-P = zeros(15,15);
-P(idx_p, idx_p)   = diag(sigma_p0.^2);
-P(idx_v, idx_v)   = diag(sigma_v0.^2);
-P(idx_th, idx_th) = diag(sigma_th0.^2);
-P(idx_bg, idx_bg) = diag(sigma_bg0.^2);
-P(idx_ba, idx_ba) = diag(sigma_ba0.^2);
+P = zeros(16,16);
+
+P(idx_p, idx_p)       = diag(sigma_p0.^2);
+P(idx_v, idx_v)       = diag(sigma_v0.^2);
+P(idx_th, idx_th)     = diag(sigma_th0.^2);
+P(idx_bg, idx_bg)     = diag(sigma_bg0.^2);
+P(idx_ba, idx_ba)     = diag(sigma_ba0.^2);
+
+% 16th state: barometer offset
+P(idx_bbaro, idx_bbaro) = params.sigma_baro_bias0^2;
 
 %% ============================================================
 % 5) Allocate logs
@@ -161,7 +188,8 @@ log_v = nan(3,N);
 log_q = nan(4,N);
 log_bg = nan(3,N);
 log_ba = nan(3,N);
-log_Pdiag = nan(15,N);
+log_bbaro = nan(1,N);
+log_Pdiag = nan(16,N);
 
 log_res_gps_pos = nan(3,N);
 log_res_gps_vel = nan(3,N);
@@ -176,11 +204,21 @@ log_v(:,1) = state.v_n;
 log_q(:,1) = state.q_nb;
 log_bg(:,1) = state.b_g;
 log_ba(:,1) = state.b_a;
+log_bbaro(1) = state.b_baro;
 log_Pdiag(:,1) = diag(P);
 
 %% ============================================================
 % 6) Main ESKF replay loop
 % ============================================================
+
+%% Baro update rate limiter
+last_baro_update_t = -inf;
+
+if isfield(params, 'max_baro_update_rate_hz') && params.max_baro_update_rate_hz > 0
+    baro_min_dt = 1 / params.max_baro_update_rate_hz;
+else
+    baro_min_dt = 0;
+end
 
 fprintf("\n[fixedwing main] ESKF replay başlıyor...\n");
 
@@ -224,14 +262,20 @@ for k = 2:N
         end
     end
 
-    %% ---------------- Baro update ----------------
+    %% ---------------- Baro update, 16-state offset model ----------------
     if USE_BARO && sim.baro_available(k)
-        z_baro = sim.baro(k);
 
-        if isfinite(z_baro)
-            [state, P, residual, ~, ~] = update_baro(state, P, z_baro, params);
-            log_res_baro(k) = residual;
-            used_baro_updates = used_baro_updates + 1;
+        if sim.t(k) - last_baro_update_t >= baro_min_dt
+
+            z_baro = sim.baro(k);
+
+            if isfinite(z_baro)
+                [state, P, residual, ~, ~] = update_baro(state, P, z_baro, params);
+
+                log_res_baro(k) = residual;
+                used_baro_updates = used_baro_updates + 1;
+                last_baro_update_t = sim.t(k);
+            end
         end
     end
 
@@ -241,6 +285,7 @@ for k = 2:N
     log_q(:,k) = state.q_nb;
     log_bg(:,k) = state.b_g;
     log_ba(:,k) = state.b_a;
+    log_bbaro(k) = state.b_baro;
     log_Pdiag(:,k) = diag(P);
 end
 
@@ -266,9 +311,18 @@ gps_pos_rmse = nan(3,1);
 gps_pos_rmse_norm = nan;
 gps_vel_rmse = nan(3,1);
 gps_vel_rmse_norm = nan;
+
 baro_rmse = nan;
 baro_mean_error = nan;
 baro_std_error = nan;
+
+baro_raw_rmse = nan;
+baro_raw_mean_error = nan;
+baro_raw_std_error = nan;
+
+baro_model_rmse = nan;
+baro_model_mean_error = nan;
+baro_model_std_error = nan;
 
 fprintf('\n--- FIXED-WING RUN FINISHED ---\n');
 
@@ -291,15 +345,34 @@ if any(idx_gps_vel)
 end
 
 if any(idx_baro)
-    baro_err = log_p(3,idx_baro) - sim.baro(idx_baro);
+    % Raw error: offset dikkate alınmadan
+    baro_raw_err = log_p(3,idx_baro) - sim.baro(idx_baro);
 
-    baro_rmse = sqrt(mean(baro_err.^2, 'omitnan'));
-    baro_mean_error = mean(baro_err, 'omitnan');
-    baro_std_error = std(baro_err, 0, 'omitnan');
+    % Modeled error: estimated baro offset dahil
+    % Measurement model:
+    %   z_baro = p_D + b_baro + noise
+    baro_model_err = log_p(3,idx_baro) + log_bbaro(idx_baro) - sim.baro(idx_baro);
 
-    fprintf('Baro Down consistency RMSE [m]       : %.3f\n', baro_rmse);
-    fprintf('Baro Down consistency mean error [m] : %.3f\n', baro_mean_error);
-    fprintf('Baro Down consistency std error [m]  : %.3f\n', baro_std_error);
+    baro_raw_rmse = sqrt(mean(baro_raw_err.^2, 'omitnan'));
+    baro_raw_mean_error = mean(baro_raw_err, 'omitnan');
+    baro_raw_std_error = std(baro_raw_err, 0, 'omitnan');
+
+    baro_model_rmse = sqrt(mean(baro_model_err.^2, 'omitnan'));
+    baro_model_mean_error = mean(baro_model_err, 'omitnan');
+    baro_model_std_error = std(baro_model_err, 0, 'omitnan');
+
+    % Eski değişkenleri geriye uyumluluk için modeled değer yapalım
+    baro_rmse = baro_model_rmse;
+    baro_mean_error = baro_model_mean_error;
+    baro_std_error = baro_model_std_error;
+
+    fprintf('Baro raw Down RMSE [m]             : %.3f\n', baro_raw_rmse);
+    fprintf('Baro raw Down mean error [m]       : %.3f\n', baro_raw_mean_error);
+    fprintf('Baro raw Down std error [m]        : %.3f\n', baro_raw_std_error);
+
+    fprintf('Baro modeled Down RMSE [m]         : %.3f\n', baro_model_rmse);
+    fprintf('Baro modeled Down mean error [m]   : %.3f\n', baro_model_mean_error);
+    fprintf('Baro modeled Down std error [m]    : %.3f\n', baro_model_std_error);
 end
 
 fprintf('\n--- UPDATE COUNTS ---\n');
@@ -315,6 +388,7 @@ fprintf('Final estimated p NED [m]     : [%.4f %.4f %.4f]^T\n', log_p(:,end));
 fprintf('Final estimated v NED [m/s]   : [%.4f %.4f %.4f]^T\n', log_v(:,end));
 fprintf('Final gyro bias [rad/s]       : [%.6f %.6f %.6f]^T\n', log_bg(:,end));
 fprintf('Final accel bias [m/s^2]      : [%.6f %.6f %.6f]^T\n', log_ba(:,end));
+fprintf('Final baro offset [m]         : %.6f\n', log_bbaro(end));
 
 fprintf('\n--- CONFIG USED ---\n');
 fprintf('Sensor profile : %s\n', params.sensor_profile);
@@ -324,6 +398,9 @@ fprintf('ATT DEBUG INIT : %d\n', USE_ATT_INIT_FOR_DEBUG);
 fprintf('sigma_gps_pos  : [%.3f %.3f %.3f]\n', params.sigma_gps_pos);
 fprintf('sigma_gps_vel  : [%.3f %.3f %.3f]\n', params.sigma_gps_vel);
 fprintf('sigma_baro     : %.3f\n', params.sigma_baro);
+fprintf('sigma_baro_bias0    : %.3f\n', params.sigma_baro_bias0);
+fprintf('sigma_baro_bias_rw  : %.6f\n', params.sigma_baro_bias_rw);
+fprintf('max_baro_update_rate_hz : %.3f\n', params.max_baro_update_rate_hz);
 
 %% ============================================================
 % 9) PX4 reference comparison from combined CSV
@@ -338,6 +415,43 @@ if USE_COMBINED_PX4_REFERENCE
 end
 
 %% ============================================================
+% 9.5) Barometer offset estimate plots
+% ============================================================
+
+figure('Name','Estimated Barometer Offset');
+plot(t, log_bbaro, 'LineWidth', 1.3);
+grid on;
+xlabel('Time [s]');
+ylabel('b_{baro} [m]');
+title('Estimated Barometer Offset State');
+
+figure('Name','Barometer Residual with Estimated Offset');
+idx_baro_res = isfinite(log_res_baro);
+
+plot(t(idx_baro_res), log_res_baro(idx_baro_res), '.');
+grid on;
+xlabel('Time [s]');
+ylabel('Baro residual [m]');
+title('Barometer Innovation: z_{baro} - (p_D + b_{baro})');
+
+figure('Name','Barometer Raw vs Modeled Error');
+if any(idx_baro)
+    subplot(2,1,1);
+    plot(t(idx_baro), baro_raw_err, '.');
+    grid on;
+    xlabel('Time [s]');
+    ylabel('p_D - z_{baro} [m]');
+    title('Raw Barometer Error without Offset State');
+
+    subplot(2,1,2);
+    plot(t(idx_baro), baro_model_err, '.');
+    grid on;
+    xlabel('Time [s]');
+    ylabel('p_D + b_{baro} - z_{baro} [m]');
+    title('Modeled Barometer Error with Estimated Offset');
+end
+
+%% ============================================================
 % 10) Save run output
 % ============================================================
 
@@ -347,11 +461,13 @@ if SAVE_RUN_OUTPUT
     save(save_file, ...
         "fixedwing_file", "combined_csv_file", ...
         "sim", "t", ...
-        "log_p", "log_v", "log_q", "log_bg", "log_ba", "log_Pdiag", ...
+        "log_p", "log_v", "log_q", "log_bg", "log_ba", "log_bbaro", "log_Pdiag", ...
         "log_res_gps_pos", "log_res_gps_vel", "log_res_baro", ...
         "gps_pos_rmse", "gps_pos_rmse_norm", ...
         "gps_vel_rmse", "gps_vel_rmse_norm", ...
         "baro_rmse", "baro_mean_error", "baro_std_error", ...
+        "baro_raw_rmse", "baro_raw_mean_error", "baro_raw_std_error", ...
+        "baro_model_rmse", "baro_model_mean_error", "baro_model_std_error", ...
         "used_gps_pos_updates", "used_gps_vel_updates", "used_baro_updates", ...
         "USE_BARO", "USE_GPS_VEL", "USE_ATT_INIT_FOR_DEBUG", ...
         "USE_COMBINED_PX4_REFERENCE", ...
@@ -440,11 +556,7 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
     fprintf("sim GPS points   : %d\n", sum(idx_sim_gps));
     fprintf("CSV GPS points   : %d\n", sum(gps_csv_valid));
 
-    %% Search tau robustly using overlap, not strict full containment
-    max_tau = max(0, t_csv(end) - t(1));
-    min_tau = -max(0, t(end) - t_csv(1));
-
-    % Bu durumda genelde tau = 0 doğru. Yine de +/- 30 s arıyoruz.
+    %% Search tau robustly using overlap
     tau_grid = -30:0.5:30;
 
     best_tau = 0;
@@ -464,7 +576,6 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
 
         valid_i = all(isfinite(gps_csv_i), 1) & all(isfinite(gps_sim), 1);
 
-        % En az GPS noktalarının %60'ı ortak olsun.
         if sum(valid_i) < 0.60*numel(t_sim_gps)
             continue;
         end

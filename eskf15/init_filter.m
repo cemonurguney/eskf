@@ -11,6 +11,7 @@ function [state, P, params] = init_filter()
     state.q_nb = [1; 0; 0; 0];
     state.b_g = [0; 0; 0];
     state.b_a = [0; 0; 0];
+    state.b_baro = 0;   % [m] barometer Down-axis measurement offset
 
     %% =========================================================
     % 2) FİZİKSEL SABİTLER
@@ -26,6 +27,11 @@ function [state, P, params] = init_filter()
 
     params.sigma_bg_rw = deg2rad(0.003); % gyro bias RW std [rad/s/sqrt(s)]
     params.sigma_ba_rw = 0.0015;         % accel bias RW std [m/s^2/sqrt(s)]
+    %% =========================================================
+    % 3) BARO BİAS GÜRÜLTÜ KABULLERİ
+    % ==========================================================
+    params.sigma_baro_bias0 = 12.0;       % [m] initial uncertainty of baro offset
+    params.sigma_baro_bias_rw = 0.01;     % [m/sqrt(s)] slow random walk
 
     %% =========================================================
     % 4) ÖLÇÜM GÜRÜLTÜ KABULLERİ
@@ -46,7 +52,7 @@ function [state, P, params] = init_filter()
     sigma_th0 = deg2rad([0.4; 0.4; 2.0]);
     sigma_bg0 = deg2rad([0.03; 0.03; 0.03]);
     sigma_ba0 = [0.020; 0.020; 0.030];
-
+    
     P = diag([
         sigma_p0.^2;
         sigma_v0.^2;
