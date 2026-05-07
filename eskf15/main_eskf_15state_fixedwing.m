@@ -28,7 +28,7 @@ save_file = "fixedwing_run_with_px4_compare.mat";
 % 1) Init filter
 % ============================================================
 
-[state, P, params] = init_filter();
+[state, ~, params] = init_filter();
 
 %% ============================================================
 % 1.5) Fixed-wing tuning
@@ -62,7 +62,7 @@ params.R_gps_vel = diag(params.sigma_gps_vel.^2);
 % Baro measurement noise.
 % Baseline'da offset çıkarılmadan baro std ~1.16 m görünüyordu.
 % O yüzden 1.8 m ile başlıyoruz, fazla agresif değil.
-params.sigma_baro = 1.8;
+params.sigma_baro = 2.5;
 params.R_baro = params.sigma_baro^2;
 
 % Barometer offset initial uncertainty.
@@ -406,12 +406,12 @@ fprintf('max_baro_update_rate_hz : %.3f\n', params.max_baro_update_rate_hz);
 % 9) PX4 reference comparison from combined CSV
 % ============================================================
 
-px4_cmp = struct();
-px4_cmp.available = false;
-
 if USE_COMBINED_PX4_REFERENCE
     px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
         combined_csv_file, t, log_p, log_v, sim);
+else
+    px4_cmp = struct();
+    px4_cmp.available = false;
 end
 
 %% ============================================================
