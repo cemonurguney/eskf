@@ -9,13 +9,14 @@ combined_csv_file = "0002_20.48.csv";
 
 %% ---------------- USER FLAGS ----------------
 USE_BARO = true;
+USE_GPS_POS = true;
 USE_GPS_VEL = true;
 USE_AIRSPEED = true;
 
 USE_ATT_INIT_FOR_DEBUG = true;
 USE_COMBINED_PX4_REFERENCE = true;
 
-SAVE_RUN_OUTPUT = true;
+SAVE_RUN_OUTPUT = false;
 save_file = "fixedwing_run_with_wind_compare.mat";
 
 %% ============================================================
@@ -41,20 +42,20 @@ params.sigma_bg_rw = deg2rad(0.010);
 params.sigma_ba_rw = 0.010;
 
 %% GPS noise
-params.sigma_gps_pos = [2.0; 2.0; 3.0];
+params.sigma_gps_pos = [3.0; 3.0; 5.0];
 params.R_gps_pos = diag(params.sigma_gps_pos.^2);
 
 params.sigma_gps_vel = [0.50; 0.50; 0.80];
 params.R_gps_vel = diag(params.sigma_gps_vel.^2);
 
 %% Barometer offset tuning
-params.sigma_baro = 2.5;
+params.sigma_baro = 3.0;
 params.R_baro = params.sigma_baro^2;
 
-params.sigma_baro_bias0 = 12.0;
+params.sigma_baro_bias0 = 10.0;
 params.sigma_baro_bias_rw = 0.01;
 
-params.max_baro_update_rate_hz = 10;
+params.max_baro_update_rate_hz = 20;
 
 %% Wind / airspeed tuning
 % TAS measurement noise.
@@ -70,7 +71,7 @@ params.sigma_wind0 = [8.0; 8.0];   % [m/s]
 params.sigma_wind_rw = 0.02;       % [m/s/sqrt(s)]
 
 % TAS çok sık geliyor, 10 Hz yeterli.
-params.max_airspeed_update_rate_hz = 10;
+params.max_airspeed_update_rate_hz = 30;
 
 params.use_joseph_form = true;
 
@@ -251,7 +252,7 @@ for k = 2:N
     P = propagate_covariance(P, F, G, Qd, dt_k);
 
     %% ---------------- GPS position update ----------------
-    if sim.gps_pos_available(k)
+    if sim.gps_pos_available(k) && USE_GPS_POS
         z_gps_pos = sim.gps_pos(:,k);
 
         if all(isfinite(z_gps_pos))

@@ -50,7 +50,7 @@ function [state, P, residual, S, K] = update_airspeed(state, P, z_tas, params)
     tas_hat = norm(v_air_n);
 
     % Çok düşük airspeed'te Jacobian güvenilmez.
-    if tas_hat < 1.0
+    if tas_hat < 0.5
         residual = nan;
         S = nan;
         K = nan(18,1);
