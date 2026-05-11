@@ -3,7 +3,7 @@ function state = inject_error_state(state, dx_hat)
 % Error-state EKF update sonrası bulunan hata düzeltmesini nominal state'e uygular.
 %
 % 16-state error-state sırası:
-%   dx = [dp; dv; dtheta; dbg; dba; db_baro]
+%   dx = [dp; dv; dtheta; dbg; dba; db_baro; dw_N; dw_E;]
 %
 % Nominal state:
 %   state.p_n     : 3x1 position, NED/ENU kullanılan main'e göre
@@ -20,8 +20,8 @@ function state = inject_error_state(state, dx_hat)
 %       q_new = q_old ⊗ dq
 
     %% Boyut kontrolü
-    if ~isvector(dx_hat) || numel(dx_hat) ~= 16
-        error('dx_hat 16 elemanlı olmalıdır: [dp; dv; dtheta; dbg; dba; db_baro].');
+    if ~isvector(dx_hat) || numel(dx_hat) ~= 18
+        error('dx_hat 16 elemanlı olmalıdır: [dp; dv; dtheta; dbg; dba; db_baro; dw_N; dw_E;].');
     end
 
     dx_hat = dx_hat(:);
@@ -33,7 +33,7 @@ function state = inject_error_state(state, dx_hat)
     d_bg     = dx_hat(10:12);
     d_ba     = dx_hat(13:15);
     d_bbaro  = dx_hat(16);
-
+    d_wind   = dx_hat(17:18);
     %% Additive nominal düzeltmeler
     state.p_n = state.p_n + d_p;
     state.v_n = state.v_n + d_v;
@@ -45,7 +45,11 @@ function state = inject_error_state(state, dx_hat)
     end
 
     state.b_baro = state.b_baro + d_bbaro;
-
+    if ~isfield(state, 'wind_ne') || isempty(state.wind_ne)
+        state.wind_ne = [0;0];
+    end
+    state.wind_ne = state.wind_ne(:) + d_wind;
+    
     %% Attitude düzeltmesi
     dq = small_angle_to_quat(d_theta);
 

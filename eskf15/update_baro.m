@@ -1,25 +1,22 @@
 function [state, P, residual, S, K] = update_baro(state, P, z_baro, params)
 %UPDATE_BARO
-% Barometer update for 16-state ESKF with estimated barometer offset.
+% Barometer update for 18-state ESKF with estimated barometer offset.
 %
 % Measurement model:
 %   z_baro = p_D + b_baro + noise
 %
 % Error-state:
-%   dx = [dp; dv; dtheta; dbg; dba; db_baro]
+%   dx = [dp; dv; dtheta; dbg; dba; db_baro; dw_N; dw_E]
 %
 % H:
 %   H(3)  = 1   -> Down position
 %   H(16) = 1   -> barometer offset
 %
-% Not:
-%   Bu model NED fixed-wing için p_n(3)=Down varsayımıyla kullanılır.
-%   ENU modunda baro modelini ayrı düşünmek gerekir, yoksa eksenler yine
-%   insanlığın üstüne kapanır.
+% Wind state bu ölçümde direkt gözlenmez.
 
     %% Boyut kontrolleri
-    if ~isequal(size(P), [16 16])
-        error('P 16x16 olmalıdır.');
+    if ~isequal(size(P), [18 18])
+        error('P 18x18 olmalıdır.');
     end
 
     if ~isscalar(z_baro) || ~isfinite(z_baro)
@@ -36,7 +33,7 @@ function [state, P, residual, S, K] = update_baro(state, P, z_baro, params)
     residual = z_baro - z_hat;
 
     %% Measurement Jacobian
-    H = zeros(1,16);
+    H = zeros(1,18);
     H(3)  = 1;
     H(16) = 1;
 
@@ -46,7 +43,7 @@ function [state, P, residual, S, K] = update_baro(state, P, z_baro, params)
     elseif isfield(params, 'sigma_baro')
         R = params.sigma_baro^2;
     else
-        R = 1.8^2;
+        R = 2.5^2;
     end
 
     %% Kalman update
@@ -58,7 +55,7 @@ function [state, P, residual, S, K] = update_baro(state, P, z_baro, params)
     state = inject_error_state(state, dx_hat);
 
     %% Covariance update
-    I = eye(16);
+    I = eye(18);
 
     if isfield(params, 'use_joseph_form') && params.use_joseph_form
         P = (I - K*H) * P * (I - K*H).' + K * R * K.';

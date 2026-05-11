@@ -1,21 +1,21 @@
 function [state, P, residual, S, K] = update_gnss_vel(state, P, z_gps_vel, params)
 %UPDATE_GNSS_VEL
-% GNSS velocity update for 16-state ESKF.
+% GNSS velocity update for 18-state ESKF.
 %
 % Measurement model:
 %   z_gps_vel = v_n + noise
 %
 % Error-state:
-%   dx = [dp; dv; dtheta; dbg; dba; db_baro]
+%   dx = [dp; dv; dtheta; dbg; dba; db_baro; dw_N; dw_E]
 %
 % H:
 %   H(:,4:6) = I3
 %
-% Baro offset state bu ölçümde direkt gözlenmez, bu yüzden H(:,16)=0.
+% Wind state burada direkt ölçülmez. GPS velocity ground velocity ölçer.
 
     %% Boyut kontrolleri
-    if ~isequal(size(P), [16 16])
-        error('P 16x16 olmalıdır.');
+    if ~isequal(size(P), [18 18])
+        error('P 18x18 olmalıdır.');
     end
 
     if ~isvector(z_gps_vel) || numel(z_gps_vel) ~= 3
@@ -29,12 +29,12 @@ function [state, P, residual, S, K] = update_gnss_vel(state, P, z_gps_vel, param
     end
 
     %% Measurement prediction
-    z_hat = state.v_n;
+    z_hat = state.v_n(:);
 
     residual = z_gps_vel - z_hat;
 
     %% Measurement Jacobian
-    H = zeros(3,16);
+    H = zeros(3,18);
     H(:,4:6) = eye(3);
 
     %% Measurement covariance
@@ -55,7 +55,7 @@ function [state, P, residual, S, K] = update_gnss_vel(state, P, z_gps_vel, param
     state = inject_error_state(state, dx_hat);
 
     %% Covariance update
-    I = eye(16);
+    I = eye(18);
 
     if isfield(params, 'use_joseph_form') && params.use_joseph_form
         P = (I - K*H) * P * (I - K*H).' + K * R * K.';

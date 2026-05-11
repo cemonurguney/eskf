@@ -1,25 +1,25 @@
 function P = propagate_covariance(P, F, ~, Qd, dt)
 %PROPAGATE_COVARIANCE
-% 16-state ESKF covariance propagation.
+% 18-state ESKF covariance propagation.
 %
 % Error-state:
-%   dx = [dp; dv; dtheta; dbg; dba; db_baro]
+%   dx = [dp; dv; dtheta; dbg; dba; db_baro; dw_N; dw_E]
 %
 % Propagation:
 %   Phi ≈ I + F dt + 0.5 F^2 dt^2
 %   P_k+1 = Phi P Phi' + Qd
 
     %% Boyut kontrolleri
-    if ~isequal(size(P), [16 16])
-        error('P matrisi 16x16 olmalıdır.');
+    if ~isequal(size(P), [18 18])
+        error('P matrisi 18x18 olmalıdır.');
     end
 
-    if ~isequal(size(F), [16 16])
-        error('F matrisi 16x16 olmalıdır.');
+    if ~isequal(size(F), [18 18])
+        error('F matrisi 18x18 olmalıdır.');
     end
 
-    if ~isequal(size(Qd), [16 16])
-        error('Qd matrisi 16x16 olmalıdır.');
+    if ~isequal(size(Qd), [18 18])
+        error('Qd matrisi 18x18 olmalıdır.');
     end
 
     if ~isscalar(dt) || ~isfinite(dt) || dt <= 0
@@ -27,8 +27,8 @@ function P = propagate_covariance(P, F, ~, Qd, dt)
     end
 
     %% State transition
-    I16 = eye(16);
-    Phi = I16 + F*dt + 0.5*(F*F)*dt^2;
+    I18 = eye(18);
+    Phi = I18 + F*dt + 0.5*(F*F)*dt^2;
 
     %% Covariance propagation
     P = Phi * P * Phi.' + Qd;
