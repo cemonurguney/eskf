@@ -9,15 +9,53 @@ combined_csv_file = "0002_20.48.csv";
 
 %% ---------------- USER FLAGS ----------------
 USE_BARO = true;
-USE_GPS_POS = true;
-USE_GPS_VEL = true;
 USE_AIRSPEED = true;
 
 USE_ATT_INIT_FOR_DEBUG = true;
 USE_COMBINED_PX4_REFERENCE = true;
 
-SAVE_RUN_OUTPUT = false;
-save_file = "fixedwing_run_with_wind_compare.mat";
+SAVE_RUN_OUTPUT = true;
+save_file = "fixedwing_run_gps_dropout_observability.mat";
+
+%% ---------------- GPS MEASUREMENT SCHEDULE ----------------
+% "always"  : GPS position + GPS velocity tüm uçuş boyunca açık
+% "never"   : GPS position + GPS velocity tüm uçuş boyunca kapalı
+% "windows" : sadece verilen zaman pencerelerinde açık
+GPS_MEAS_MODE = "windows";
+
+% Resetlenmiş sim zamanı üzerinden saniye cinsinden.
+% Örnek: 120-150 s arası GPS kesintisi istiyorsan:
+% GPS_MEAS_WINDOWS = [0 120; 150 375];
+%
+% Örnek: İlk 30 s GPS var, 180-220 s tekrar var:
+% GPS_MEAS_WINDOWS = [0 30; 180 220];
+
+GPS_MEAS_WINDOWS = [
+    0    120
+    150  375
+];
+
+%% ---------------- BARO BIAS OBSERVABILITY ----------------
+% Baro bias sadece GPS position height yakın zamanda geldiyse estimate edilir.
+% GPS yokken b_baro freeze kalır.
+ESTIMATE_BARO_BIAS_WITH_GPS = true;
+
+% GPS 5 Hz civarı. 0.5 s, yaklaşık 2-3 GPS position sample aralığı.
+GPS_HEIGHT_ANCHOR_TIMEOUT_S = 0.50;
+
+% GPS gidince bias state'i freeze edilir.
+BARO_BIAS_FREEZE_STD = 0.05;      % [m]
+
+% GPS geri gelince bias tekrar oynayabilsin diye covariance açılır.
+BARO_BIAS_REACQUIRE_STD = 1.0;    % [m]
+
+%% ---------------- GPS OUTAGE COVARIANCE HANDLING ----------------
+GPS_OUTAGE_POS_INFLATE_NE = [6.0; 12.0];      % [m]
+GPS_OUTAGE_VEL_INFLATE_NE = [1.0; 1.2];       % [m/s]
+
+GPS_OUTAGE_SIGMA_A_SCALE     = 3.0;
+GPS_OUTAGE_SIGMA_G_SCALE     = 1.5;
+GPS_OUTAGE_SIGMA_BA_RW_SCALE = 4.0;
 
 %% ============================================================
 % 1) Init filter
@@ -57,20 +95,16 @@ params.sigma_baro_bias_rw = 0.01;
 
 params.max_baro_update_rate_hz = 20;
 
+% Loop içinde dinamik güncellenecek.
+params.estimate_baro_bias = false;
+
 %% Wind / airspeed tuning
-% TAS measurement noise.
-% İlk deneme için çok agresif değil.
-params.sigma_tas = 2.5;       % [m/s]
+params.sigma_tas = 2.5;
 params.R_tas = params.sigma_tas^2;
 
-% Initial horizontal wind uncertainty.
-params.sigma_wind0 = [8.0; 8.0];   % [m/s]
+params.sigma_wind0 = [8.0; 8.0];
+params.sigma_wind_rw = 0.02;
 
-% Wind random walk.
-% Çok büyük olursa rüzgar zıplar, çok küçük olursa öğrenmez.
-params.sigma_wind_rw = 0.02;       % [m/s/sqrt(s)]
-
-% TAS çok sık geliyor, 10 Hz yeterli.
 params.max_airspeed_update_rate_hz = 30;
 
 params.use_joseph_form = true;
@@ -87,9 +121,32 @@ sim = build_sim_from_fixedwing_mat(fixedwing_file, t_start, t_end);
 t = sim.t;
 N = numel(t);
 
-fprintf("\n=== MAIN FIXED-WING 18-STATE ESKF ===\n");
+fprintf("\n=== MAIN FIXED-WING 18-STATE ESKF, GPS DROPOUT OBSERVABILITY TEST ===\n");
 fprintf("N = %d samples\n", N);
 fprintf("t range = %.3f to %.3f s\n", t(1), t(end));
+
+fprintf('\n--- GPS MEASUREMENT WINDOWS ---\n');
+disp(GPS_MEAS_WINDOWS);
+
+tmp_use_gps = false(1,N);
+for kk = 1:N
+    tmp_use_gps(kk) = is_gps_schedule_active(sim.t(kk), GPS_MEAS_MODE, GPS_MEAS_WINDOWS);
+end
+
+fprintf('Expected GPS active time [s]   : %.3f\n', sum(tmp_use_gps) * median(diff(sim.t), "omitnan"));
+fprintf('Expected GPS active samples    : %d / %d\n', sum(tmp_use_gps), N);
+
+%% ============================================================
+% 2.5) Barometer bias initial value
+% ============================================================
+
+% Bu deneyde başta kalibrasyon yok.
+% b_baro = 0 başlıyor, GPS measurement pencerelerinde öğreniliyor,
+% GPS gidince freeze ediliyor.
+b_baro0 = 0;
+
+fprintf('[fixedwing main] Dynamic GPS dropout test: b_baro starts at zero.\n');
+fprintf('[fixedwing main] b_baro will be estimated only after recent GPS position height updates.\n');
 
 %% ============================================================
 % 3) Initial nominal state
@@ -127,7 +184,7 @@ state.b_g = [0;0;0];
 state.b_a = [0;0;0];
 
 % 16th nominal state
-state.b_baro = 0;
+state.b_baro = b_baro0;
 
 % 17-18th nominal states
 state.wind_ne = [0;0];
@@ -139,9 +196,9 @@ fprintf('[fixedwing main] Initial ba = [%.6f %.6f %.6f]^T m/s^2\n', state.b_a);
 fprintf('[fixedwing main] Initial b_baro = %.6f m\n', state.b_baro);
 fprintf('[fixedwing main] Initial wind NE = [%.6f %.6f]^T m/s\n', state.wind_ne);
 fprintf('[fixedwing main] USE_BARO = %d\n', USE_BARO);
-fprintf('[fixedwing main] USE_GPS_VEL = %d\n', USE_GPS_VEL);
 fprintf('[fixedwing main] USE_AIRSPEED = %d\n', USE_AIRSPEED);
-fprintf('[fixedwing main] USE_ATT_INIT_FOR_DEBUG = %d\n', USE_ATT_INIT_FOR_DEBUG);
+fprintf('[fixedwing main] GPS_MEAS_MODE = %s\n', GPS_MEAS_MODE);
+fprintf('[fixedwing main] ESTIMATE_BARO_BIAS_WITH_GPS = %d\n', ESTIMATE_BARO_BIAS_WITH_GPS);
 
 %% ============================================================
 % 4) Initial covariance, 18-state
@@ -169,13 +226,13 @@ sigma_ba0 = [0.30; 0.30; 0.50];
 
 P = zeros(18,18);
 
-P(idx_p, idx_p)       = diag(sigma_p0.^2);
-P(idx_v, idx_v)       = diag(sigma_v0.^2);
-P(idx_th, idx_th)     = diag(sigma_th0.^2);
-P(idx_bg, idx_bg)     = diag(sigma_bg0.^2);
-P(idx_ba, idx_ba)     = diag(sigma_ba0.^2);
+P(idx_p, idx_p)         = diag(sigma_p0.^2);
+P(idx_v, idx_v)         = diag(sigma_v0.^2);
+P(idx_th, idx_th)       = diag(sigma_th0.^2);
+P(idx_bg, idx_bg)       = diag(sigma_bg0.^2);
+P(idx_ba, idx_ba)       = diag(sigma_ba0.^2);
 P(idx_bbaro, idx_bbaro) = params.sigma_baro_bias0^2;
-P(idx_wind, idx_wind) = diag(params.sigma_wind0.^2);
+P(idx_wind, idx_wind)   = diag(params.sigma_wind0.^2);
 
 %% ============================================================
 % 5) Allocate logs
@@ -194,6 +251,9 @@ log_res_gps_pos = nan(3,N);
 log_res_gps_vel = nan(3,N);
 log_res_baro = nan(1,N);
 log_res_airspeed = nan(1,N);
+
+log_use_gps_meas = false(1,N);
+log_estimate_baro_bias = false(1,N);
 
 used_gps_pos_updates = 0;
 used_gps_vel_updates = 0;
@@ -228,6 +288,20 @@ else
 end
 
 %% ============================================================
+% 6.5) Dynamic GPS / baro-bias observability state
+% ============================================================
+
+prev_use_gps_meas = is_gps_schedule_active(t(1), GPS_MEAS_MODE, GPS_MEAS_WINDOWS);
+
+last_gps_pos_update_t = -inf;
+last_gps_vel_update_t = -inf;
+
+baro_bias_hold_value = state.b_baro;
+
+log_use_gps_meas(1) = prev_use_gps_meas;
+log_estimate_baro_bias(1) = false;
+
+%% ============================================================
 % 7) Main ESKF replay loop
 % ============================================================
 
@@ -242,35 +316,105 @@ for k = 2:N
         continue;
     end
 
+    %% ---------------- GPS measurement schedule ----------------
+    use_gps_meas_now = is_gps_schedule_active(sim.t(k), GPS_MEAS_MODE, GPS_MEAS_WINDOWS);
+
+    % GPS ON -> OFF:
+    % b_baro artık gözlenebilir değil, o andaki değeri freeze ediyoruz.
+    % Aynı anda yatay P şişiriyoruz, çünkü GPS yokken N/E drift beklenir.
+    if prev_use_gps_meas && ~use_gps_meas_now
+        baro_bias_hold_value = state.b_baro;
+
+        P(16,:) = 0;
+        P(:,16) = 0;
+        P(16,16) = BARO_BIAS_FREEZE_STD^2;
+
+        % GPS outage covariance inflation
+        P(1:2,1:2) = P(1:2,1:2) + diag(GPS_OUTAGE_POS_INFLATE_NE.^2);
+        P(4:5,4:5) = P(4:5,4:5) + diag(GPS_OUTAGE_VEL_INFLATE_NE.^2);
+        P = 0.5 * (P + P.');
+
+        fprintf('[fixedwing main] t=%.2f s: GPS OFF, freezing b_baro = %.6f m\n', ...
+            sim.t(k), baro_bias_hold_value);
+    end
+
+    % GPS OFF -> ON:
+    % Bias tekrar gözlenebilir olacak. Covariance'ı biraz açıyoruz.
+    if ~prev_use_gps_meas && use_gps_meas_now
+        P(16,:) = 0;
+        P(:,16) = 0;
+        P(16,16) = BARO_BIAS_REACQUIRE_STD^2;
+
+        fprintf('[fixedwing main] t=%.2f s: GPS ON, re-enabling b_baro estimation\n', ...
+            sim.t(k));
+    end
+
+    % GPS yokken bias gerçekten sabit kalsın.
+    if ~use_gps_meas_now
+        state.b_baro = baro_bias_hold_value;
+    end
+
+    %% ---------------- Per-step params ----------------
+    params_k = params;
+
+    % GPS yokken process noise artırılır.
+    % Ama baro bias random walk kapatılır, çünkü b_baro freeze.
+    if ~use_gps_meas_now
+        params_k.sigma_baro_bias_rw = 0.0;
+
+        params_k.sigma_a     = params.sigma_a     * GPS_OUTAGE_SIGMA_A_SCALE;
+        params_k.sigma_g     = params.sigma_g     * GPS_OUTAGE_SIGMA_G_SCALE;
+        params_k.sigma_ba_rw = params.sigma_ba_rw * GPS_OUTAGE_SIGMA_BA_RW_SCALE;
+    end
+
+    params_k.estimate_baro_bias = false;
+
+    %% ---------------- IMU propagation ----------------
     imu.gyro_m  = sim.imu_gyro(:,k);
     imu.accel_m = sim.imu_accel(:,k);
 
-    %% ---------------- Propagation ----------------
-    state = propagate_nominal(state, imu, params, dt_k);
+    state = propagate_nominal(state, imu, params_k, dt_k);
 
-    [F, G, Qd] = compute_F_G_Qd(state, imu, params, dt_k);
+    [F, G, Qd] = compute_F_G_Qd(state, imu, params_k, dt_k);
     P = propagate_covariance(P, F, G, Qd, dt_k);
 
     %% ---------------- GPS position update ----------------
-    if sim.gps_pos_available(k) && USE_GPS_POS
+    if use_gps_meas_now && sim.gps_pos_available(k)
         z_gps_pos = sim.gps_pos(:,k);
 
         if all(isfinite(z_gps_pos))
-            [state, P, residual, ~, ~] = update_gnss_pos(state, P, z_gps_pos, params);
+            [state, P, residual, ~, ~] = update_gnss_pos(state, P, z_gps_pos, params_k);
             log_res_gps_pos(:,k) = residual;
             used_gps_pos_updates = used_gps_pos_updates + 1;
+            last_gps_pos_update_t = sim.t(k);
         end
     end
 
     %% ---------------- GPS velocity update ----------------
-    if USE_GPS_VEL && sim.gps_vel_available(k)
+    if use_gps_meas_now && sim.gps_vel_available(k)
         z_gps_vel = sim.gps_vel(:,k);
 
         if all(isfinite(z_gps_vel))
-            [state, P, residual, ~, ~] = update_gnss_vel(state, P, z_gps_vel, params);
+            [state, P, residual, ~, ~] = update_gnss_vel(state, P, z_gps_vel, params_k);
             log_res_gps_vel(:,k) = residual;
             used_gps_vel_updates = used_gps_vel_updates + 1;
+            last_gps_vel_update_t = sim.t(k);
         end
+    end
+
+    %% ---------------- Is baro bias observable now? ----------------
+    % Hz farkı burada önemli:
+    % GPS 5 Hz, baro ~20 Hz kullanılıyor.
+    % Baro bias'ı sadece son GPS position height update'i yakın zamandaysa açıyoruz.
+    gps_height_recent = use_gps_meas_now && ...
+        ((sim.t(k) - last_gps_pos_update_t) <= GPS_HEIGHT_ANCHOR_TIMEOUT_S);
+
+    estimate_baro_bias_now = ESTIMATE_BARO_BIAS_WITH_GPS && gps_height_recent;
+
+    params_k.estimate_baro_bias = estimate_baro_bias_now;
+
+    if ~estimate_baro_bias_now
+        params_k.sigma_baro_bias_rw = 0.0;
     end
 
     %% ---------------- Baro update ----------------
@@ -281,7 +425,7 @@ for k = 2:N
             z_baro = sim.baro(k);
 
             if isfinite(z_baro)
-                [state, P, residual, ~, ~] = update_baro(state, P, z_baro, params);
+                [state, P, residual, ~, ~] = update_baro(state, P, z_baro, params_k);
 
                 log_res_baro(k) = residual;
                 used_baro_updates = used_baro_updates + 1;
@@ -298,7 +442,7 @@ for k = 2:N
             z_tas = sim.airspeed(k);
 
             if isfinite(z_tas) && z_tas > 3
-                [state, P, residual, ~, ~] = update_airspeed(state, P, z_tas, params);
+                [state, P, residual, ~, ~] = update_airspeed(state, P, z_tas, params_k);
 
                 if isfinite(residual)
                     log_res_airspeed(k) = residual;
@@ -307,6 +451,15 @@ for k = 2:N
                 end
             end
         end
+    end
+
+    %% ---------------- Enforce b_baro freeze during GPS outage ----------------
+    if ~use_gps_meas_now
+        state.b_baro = baro_bias_hold_value;
+
+        P(16,:) = 0;
+        P(:,16) = 0;
+        P(16,16) = BARO_BIAS_FREEZE_STD^2;
     end
 
     %% ---------------- Logging ----------------
@@ -318,6 +471,11 @@ for k = 2:N
     log_bbaro(k) = state.b_baro;
     log_wind_ne(:,k) = state.wind_ne;
     log_Pdiag(:,k) = diag(P);
+
+    log_use_gps_meas(k) = use_gps_meas_now;
+    log_estimate_baro_bias(k) = estimate_baro_bias_now;
+
+    prev_use_gps_meas = use_gps_meas_now;
 end
 
 fprintf("[fixedwing main] ESKF replay bitti.\n");
@@ -334,15 +492,31 @@ plot_results_fixedwing_obs(sim, t, log_p, log_v, log_q, ...
 % 9) Metrics
 % ============================================================
 
-idx_gps_pos = sim.gps_pos_available & all(isfinite(sim.gps_pos),1);
-idx_gps_vel = sim.gps_vel_available & all(isfinite(sim.gps_vel),1);
+idx_gps_pos_all = sim.gps_pos_available & all(isfinite(sim.gps_pos),1);
+idx_gps_vel_all = sim.gps_vel_available & all(isfinite(sim.gps_vel),1);
 idx_baro = sim.baro_available & isfinite(sim.baro);
 idx_air = isfinite(log_res_airspeed);
+
+idx_gps_pos_used = idx_gps_pos_all & log_use_gps_meas;
+idx_gps_pos_holdout = idx_gps_pos_all & ~log_use_gps_meas;
+
+idx_gps_vel_used = idx_gps_vel_all & log_use_gps_meas;
+idx_gps_vel_holdout = idx_gps_vel_all & ~log_use_gps_meas;
 
 gps_pos_rmse = nan(3,1);
 gps_pos_rmse_norm = nan;
 gps_vel_rmse = nan(3,1);
 gps_vel_rmse_norm = nan;
+
+gps_pos_rmse_used = nan(3,1);
+gps_pos_rmse_used_norm = nan;
+gps_pos_rmse_holdout = nan(3,1);
+gps_pos_rmse_holdout_norm = nan;
+
+gps_vel_rmse_used = nan(3,1);
+gps_vel_rmse_used_norm = nan;
+gps_vel_rmse_holdout = nan(3,1);
+gps_vel_rmse_holdout_norm = nan;
 
 baro_rmse = nan;
 baro_mean_error = nan;
@@ -362,22 +536,58 @@ airspeed_std_error = nan;
 
 fprintf('\n--- FIXED-WING RUN FINISHED ---\n');
 
-if any(idx_gps_pos)
-    gps_pos_err = log_p(:,idx_gps_pos) - sim.gps_pos(:,idx_gps_pos);
+if any(idx_gps_pos_all)
+    gps_pos_err = log_p(:,idx_gps_pos_all) - sim.gps_pos(:,idx_gps_pos_all);
     gps_pos_rmse = sqrt(mean(gps_pos_err.^2, 2, 'omitnan'));
     gps_pos_rmse_norm = sqrt(mean(sum(gps_pos_err.^2,1), 'omitnan'));
 
-    fprintf('GPS position consistency RMSE N/E/D [m] : [%.3f %.3f %.3f]\n', gps_pos_rmse);
-    fprintf('GPS position consistency RMSE norm [m]  : %.3f\n', gps_pos_rmse_norm);
+    fprintf('GPS position ALL RMSE N/E/D [m]      : [%.3f %.3f %.3f]\n', gps_pos_rmse);
+    fprintf('GPS position ALL RMSE norm [m]       : %.3f\n', gps_pos_rmse_norm);
 end
 
-if any(idx_gps_vel)
-    gps_vel_err = log_v(:,idx_gps_vel) - sim.gps_vel(:,idx_gps_vel);
+if any(idx_gps_pos_used)
+    err = log_p(:,idx_gps_pos_used) - sim.gps_pos(:,idx_gps_pos_used);
+    gps_pos_rmse_used = sqrt(mean(err.^2, 2, 'omitnan'));
+    gps_pos_rmse_used_norm = sqrt(mean(sum(err.^2,1), 'omitnan'));
+
+    fprintf('GPS position USED RMSE N/E/D [m]     : [%.3f %.3f %.3f]\n', gps_pos_rmse_used);
+    fprintf('GPS position USED RMSE norm [m]      : %.3f\n', gps_pos_rmse_used_norm);
+end
+
+if any(idx_gps_pos_holdout)
+    err = log_p(:,idx_gps_pos_holdout) - sim.gps_pos(:,idx_gps_pos_holdout);
+    gps_pos_rmse_holdout = sqrt(mean(err.^2, 2, 'omitnan'));
+    gps_pos_rmse_holdout_norm = sqrt(mean(sum(err.^2,1), 'omitnan'));
+
+    fprintf('GPS position HOLDOUT RMSE N/E/D [m]  : [%.3f %.3f %.3f]\n', gps_pos_rmse_holdout);
+    fprintf('GPS position HOLDOUT RMSE norm [m]   : %.3f\n', gps_pos_rmse_holdout_norm);
+end
+
+if any(idx_gps_vel_all)
+    gps_vel_err = log_v(:,idx_gps_vel_all) - sim.gps_vel(:,idx_gps_vel_all);
     gps_vel_rmse = sqrt(mean(gps_vel_err.^2, 2, 'omitnan'));
     gps_vel_rmse_norm = sqrt(mean(sum(gps_vel_err.^2,1), 'omitnan'));
 
-    fprintf('GPS velocity consistency RMSE N/E/D [m/s] : [%.3f %.3f %.3f]\n', gps_vel_rmse);
-    fprintf('GPS velocity consistency RMSE norm [m/s]  : %.3f\n', gps_vel_rmse_norm);
+    fprintf('GPS velocity ALL RMSE N/E/D [m/s]      : [%.3f %.3f %.3f]\n', gps_vel_rmse);
+    fprintf('GPS velocity ALL RMSE norm [m/s]       : %.3f\n', gps_vel_rmse_norm);
+end
+
+if any(idx_gps_vel_used)
+    err = log_v(:,idx_gps_vel_used) - sim.gps_vel(:,idx_gps_vel_used);
+    gps_vel_rmse_used = sqrt(mean(err.^2, 2, 'omitnan'));
+    gps_vel_rmse_used_norm = sqrt(mean(sum(err.^2,1), 'omitnan'));
+
+    fprintf('GPS velocity USED RMSE N/E/D [m/s]     : [%.3f %.3f %.3f]\n', gps_vel_rmse_used);
+    fprintf('GPS velocity USED RMSE norm [m/s]      : %.3f\n', gps_vel_rmse_used_norm);
+end
+
+if any(idx_gps_vel_holdout)
+    err = log_v(:,idx_gps_vel_holdout) - sim.gps_vel(:,idx_gps_vel_holdout);
+    gps_vel_rmse_holdout = sqrt(mean(err.^2, 2, 'omitnan'));
+    gps_vel_rmse_holdout_norm = sqrt(mean(sum(err.^2,1), 'omitnan'));
+
+    fprintf('GPS velocity HOLDOUT RMSE N/E/D [m/s]  : [%.3f %.3f %.3f]\n', gps_vel_rmse_holdout);
+    fprintf('GPS velocity HOLDOUT RMSE norm [m/s]   : %.3f\n', gps_vel_rmse_holdout_norm);
 end
 
 if any(idx_baro)
@@ -396,13 +606,13 @@ if any(idx_baro)
     baro_mean_error = baro_model_mean_error;
     baro_std_error = baro_model_std_error;
 
-    fprintf('Baro raw Down RMSE [m]             : %.3f\n', baro_raw_rmse);
-    fprintf('Baro raw Down mean error [m]       : %.3f\n', baro_raw_mean_error);
-    fprintf('Baro raw Down std error [m]        : %.3f\n', baro_raw_std_error);
+    fprintf('Baro raw Down RMSE [m]              : %.3f\n', baro_raw_rmse);
+    fprintf('Baro raw Down mean error [m]        : %.3f\n', baro_raw_mean_error);
+    fprintf('Baro raw Down std error [m]         : %.3f\n', baro_raw_std_error);
 
-    fprintf('Baro modeled Down RMSE [m]         : %.3f\n', baro_model_rmse);
-    fprintf('Baro modeled Down mean error [m]   : %.3f\n', baro_model_mean_error);
-    fprintf('Baro modeled Down std error [m]    : %.3f\n', baro_model_std_error);
+    fprintf('Baro modeled Down RMSE [m]          : %.3f\n', baro_model_rmse);
+    fprintf('Baro modeled Down mean error [m]    : %.3f\n', baro_model_mean_error);
+    fprintf('Baro modeled Down std error [m]     : %.3f\n', baro_model_std_error);
 end
 
 if any(idx_air)
@@ -410,9 +620,9 @@ if any(idx_air)
     airspeed_mean_error = mean(log_res_airspeed(idx_air), 'omitnan');
     airspeed_std_error = std(log_res_airspeed(idx_air), 0, 'omitnan');
 
-    fprintf('Airspeed residual RMSE [m/s]       : %.3f\n', airspeed_rmse);
-    fprintf('Airspeed residual mean [m/s]       : %.3f\n', airspeed_mean_error);
-    fprintf('Airspeed residual std [m/s]        : %.3f\n', airspeed_std_error);
+    fprintf('Airspeed residual RMSE [m/s]        : %.3f\n', airspeed_rmse);
+    fprintf('Airspeed residual mean [m/s]        : %.3f\n', airspeed_mean_error);
+    fprintf('Airspeed residual std [m/s]         : %.3f\n', airspeed_std_error);
 end
 
 %% Wind reference comparison
@@ -430,9 +640,9 @@ if isfield(sim, "wind_ref_available") && any(sim.wind_ref_available)
         wind_ref_rmse_norm = sqrt(mean(sum(wind_err.^2,1), 'omitnan'));
         wind_ref_mean_error = mean(wind_err, 2, 'omitnan');
 
-        fprintf('Wind vs PX4 ref RMSE N/E [m/s]    : [%.3f %.3f]\n', wind_ref_rmse);
-        fprintf('Wind vs PX4 ref RMSE norm [m/s]   : %.3f\n', wind_ref_rmse_norm);
-        fprintf('Wind vs PX4 ref mean N/E [m/s]    : [%.3f %.3f]\n', wind_ref_mean_error);
+        fprintf('Wind vs PX4 ref RMSE N/E [m/s]     : [%.3f %.3f]\n', wind_ref_rmse);
+        fprintf('Wind vs PX4 ref RMSE norm [m/s]    : %.3f\n', wind_ref_rmse_norm);
+        fprintf('Wind vs PX4 ref mean N/E [m/s]     : [%.3f %.3f]\n', wind_ref_mean_error);
     end
 end
 
@@ -449,6 +659,9 @@ if isfield(sim, "airspeed_available")
 end
 fprintf('Airspeed updates used      : %d\n', used_airspeed_updates);
 
+fprintf('GPS measurement scheduled samples       : %d\n', sum(log_use_gps_meas));
+fprintf('Baro bias estimated samples             : %d\n', sum(log_estimate_baro_bias));
+
 fprintf('\n--- FINAL STATES ---\n');
 fprintf('Final estimated p NED [m]     : [%.4f %.4f %.4f]^T\n', log_p(:,end));
 fprintf('Final estimated v NED [m/s]   : [%.4f %.4f %.4f]^T\n', log_v(:,end));
@@ -460,9 +673,16 @@ fprintf('Final wind NE [m/s]           : [%.6f %.6f]^T\n', log_wind_ne(:,end));
 fprintf('\n--- CONFIG USED ---\n');
 fprintf('Sensor profile : %s\n', params.sensor_profile);
 fprintf('USE_BARO       : %d\n', USE_BARO);
-fprintf('USE_GPS_VEL    : %d\n', USE_GPS_VEL);
 fprintf('USE_AIRSPEED   : %d\n', USE_AIRSPEED);
 fprintf('ATT DEBUG INIT : %d\n', USE_ATT_INIT_FOR_DEBUG);
+fprintf('GPS_MEAS_MODE  : %s\n', GPS_MEAS_MODE);
+fprintf('GPS_HEIGHT_ANCHOR_TIMEOUT_S : %.3f\n', GPS_HEIGHT_ANCHOR_TIMEOUT_S);
+fprintf('EST BARO BIAS WITH GPS      : %d\n', ESTIMATE_BARO_BIAS_WITH_GPS);
+fprintf('GPS_OUTAGE_POS_INFLATE_NE   : [%.3f %.3f]\n', GPS_OUTAGE_POS_INFLATE_NE);
+fprintf('GPS_OUTAGE_VEL_INFLATE_NE   : [%.3f %.3f]\n', GPS_OUTAGE_VEL_INFLATE_NE);
+fprintf('GPS_OUTAGE_SIGMA_A_SCALE     : %.3f\n', GPS_OUTAGE_SIGMA_A_SCALE);
+fprintf('GPS_OUTAGE_SIGMA_G_SCALE     : %.3f\n', GPS_OUTAGE_SIGMA_G_SCALE);
+fprintf('GPS_OUTAGE_SIGMA_BA_RW_SCALE : %.3f\n', GPS_OUTAGE_SIGMA_BA_RW_SCALE);
 fprintf('sigma_gps_pos  : [%.3f %.3f %.3f]\n', params.sigma_gps_pos);
 fprintf('sigma_gps_vel  : [%.3f %.3f %.3f]\n', params.sigma_gps_vel);
 fprintf('sigma_baro     : %.3f\n', params.sigma_baro);
@@ -493,6 +713,23 @@ xlabel('Time [s]');
 ylabel('b_{baro} [m]');
 title('Estimated Barometer Offset State');
 
+figure('Name','GPS Measurement Schedule and Baro Bias Observability');
+yyaxis left;
+plot(t, log_bbaro, 'LineWidth', 1.3);
+ylabel('b_{baro} [m]');
+grid on;
+
+yyaxis right;
+stairs(t, double(log_use_gps_meas), 'LineWidth', 1.1);
+hold on;
+stairs(t, double(log_estimate_baro_bias), '--', 'LineWidth', 1.1);
+ylabel('Flag');
+ylim([-0.1 1.1]);
+
+xlabel('Time [s]');
+legend('b_{baro}', 'GPS pos+vel scheduled', 'baro bias estimated', 'Location','best');
+title('GPS Dropout Schedule and Barometer Bias Observability');
+
 figure('Name','Estimated Wind NE');
 plot(t, log_wind_ne(1,:), 'LineWidth', 1.3);
 hold on;
@@ -518,6 +755,21 @@ xlabel('Time [s]');
 ylabel('TAS residual [m/s]');
 title('Airspeed Innovation: z_{TAS} - ||v - w||');
 
+figure('Name','GPS Position Holdout Error');
+if any(idx_gps_pos_holdout)
+    err_hold = log_p(:,idx_gps_pos_holdout) - sim.gps_pos(:,idx_gps_pos_holdout);
+    th = t(idx_gps_pos_holdout);
+
+    plot(th, err_hold(1,:), '.'); hold on;
+    plot(th, err_hold(2,:), '.');
+    plot(th, err_hold(3,:), '.');
+    grid on;
+    xlabel('Time [s]');
+    ylabel('Position error wrt held-out GPS [m]');
+    legend('N','E','D');
+    title('GPS Position Holdout Error During GPS Dropout');
+end
+
 %% ============================================================
 % 12) Save run output
 % ============================================================
@@ -531,8 +783,13 @@ if SAVE_RUN_OUTPUT
         "log_p", "log_v", "log_q", ...
         "log_bg", "log_ba", "log_bbaro", "log_wind_ne", "log_Pdiag", ...
         "log_res_gps_pos", "log_res_gps_vel", "log_res_baro", "log_res_airspeed", ...
+        "log_use_gps_meas", "log_estimate_baro_bias", ...
         "gps_pos_rmse", "gps_pos_rmse_norm", ...
         "gps_vel_rmse", "gps_vel_rmse_norm", ...
+        "gps_pos_rmse_used", "gps_pos_rmse_used_norm", ...
+        "gps_pos_rmse_holdout", "gps_pos_rmse_holdout_norm", ...
+        "gps_vel_rmse_used", "gps_vel_rmse_used_norm", ...
+        "gps_vel_rmse_holdout", "gps_vel_rmse_holdout_norm", ...
         "baro_rmse", "baro_mean_error", "baro_std_error", ...
         "baro_raw_rmse", "baro_raw_mean_error", "baro_raw_std_error", ...
         "baro_model_rmse", "baro_model_mean_error", "baro_model_std_error", ...
@@ -540,9 +797,47 @@ if SAVE_RUN_OUTPUT
         "wind_ref_rmse", "wind_ref_rmse_norm", "wind_ref_mean_error", ...
         "used_gps_pos_updates", "used_gps_vel_updates", ...
         "used_baro_updates", "used_airspeed_updates", ...
-        "USE_BARO", "USE_GPS_VEL", "USE_AIRSPEED", "USE_ATT_INIT_FOR_DEBUG", ...
+        "USE_BARO", "USE_AIRSPEED", "USE_ATT_INIT_FOR_DEBUG", ...
+        "GPS_MEAS_MODE", "GPS_MEAS_WINDOWS", ...
+        "GPS_HEIGHT_ANCHOR_TIMEOUT_S", ...
+        "ESTIMATE_BARO_BIAS_WITH_GPS", ...
+        "BARO_BIAS_FREEZE_STD", "BARO_BIAS_REACQUIRE_STD", ...
+        "GPS_OUTAGE_POS_INFLATE_NE", "GPS_OUTAGE_VEL_INFLATE_NE", ...
+        "GPS_OUTAGE_SIGMA_A_SCALE", "GPS_OUTAGE_SIGMA_G_SCALE", ...
+        "GPS_OUTAGE_SIGMA_BA_RW_SCALE", ...
         "USE_COMBINED_PX4_REFERENCE", ...
         "params", "px4_cmp", "-v7.3");
 
     fprintf("[fixedwing main] Saved: %s\n", save_file);
+end
+
+%% ============================================================
+% Local helper: GPS schedule
+% ============================================================
+
+function active = is_gps_schedule_active(t_now, mode, windows)
+    switch mode
+        case "always"
+            active = true;
+
+        case "never"
+            active = false;
+
+        case "windows"
+            active = false;
+
+            if isempty(windows)
+                return;
+            end
+
+            for iw = 1:size(windows,1)
+                if t_now >= windows(iw,1) && t_now <= windows(iw,2)
+                    active = true;
+                    return;
+                end
+            end
+
+        otherwise
+            error('Unknown GPS_MEAS_MODE: %s', mode);
+    end
 end

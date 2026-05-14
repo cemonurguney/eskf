@@ -1,6 +1,6 @@
 function [state, P, residual, S, K] = update_baro(state, P, z_baro, params)
 %UPDATE_BARO
-% Barometer update for 18-state ESKF with estimated barometer offset.
+% Barometer update for 18-state ESKF with optionally estimated barometer offset.
 %
 % Measurement model:
 %   z_baro = p_D + b_baro + noise
@@ -8,11 +8,16 @@ function [state, P, residual, S, K] = update_baro(state, P, z_baro, params)
 % Error-state:
 %   dx = [dp; dv; dtheta; dbg; dba; db_baro; dw_N; dw_E]
 %
-% H:
+% If params.estimate_baro_bias = true:
 %   H(3)  = 1   -> Down position
 %   H(16) = 1   -> barometer offset
 %
-% Wind state bu ölçümde direkt gözlenmez.
+% If params.estimate_baro_bias = false:
+%   H(3)  = 1
+%   H(16) = 0
+%
+% In the second case, b_baro is used as a fixed compensation term, not
+% estimated by the measurement update.
 
     %% Boyut kontrolleri
     if ~isequal(size(P), [18 18])
@@ -34,8 +39,13 @@ function [state, P, residual, S, K] = update_baro(state, P, z_baro, params)
 
     %% Measurement Jacobian
     H = zeros(1,18);
-    H(3)  = 1;
-    H(16) = 1;
+    H(3) = 1;
+
+    if isfield(params, 'estimate_baro_bias') && params.estimate_baro_bias
+        H(16) = 1;
+    else
+        H(16) = 0;
+    end
 
     %% Measurement covariance
     if isfield(params, 'R_baro')
