@@ -117,7 +117,7 @@ function plot_results(sim, t, log_p, log_v, log_q, log_bg, log_ba, log_Pdiag, ..
     plot_trajectory_compare_views_local(sim, log_p, t);
 
     %% 7) UAV-like 3D Animation
-    animate_uav_compare_local(sim, log_p, log_q, t, params);
+    %animate_uav_compare_local(sim, log_p, log_q, t, params);
 
     %% 8) Gyro Bias Estimate
     figure('Name','Gyro Bias Estimate');
@@ -282,148 +282,148 @@ function plot_trajectory_compare_views_local(sim, log_p, t)
     title('Position error norm');
 end
 
-function animate_uav_compare_local(sim, log_p, log_q, t, params)
-% Animasyon süresi simülasyon süresiyle senkron akar.
-% playback_rate = 1.0 ise gerçek zamanlı oynar.
-
-    if isfield(params,'anim') && isfield(params.anim,'step')
-        step = params.anim.step;
-    else
-        step = 5;
-    end
-
-    if isfield(params,'anim') && isfield(params.anim,'trail_len')
-        trail_len = params.anim.trail_len;
-    else
-        trail_len = 120;
-    end
-
-    if isfield(params,'anim') && isfield(params.anim,'axis_len_truth')
-        axis_len_truth = params.anim.axis_len_truth;
-    else
-        axis_len_truth = 14;
-    end
-
-    if isfield(params,'anim') && isfield(params.anim,'axis_len_est')
-        axis_len_est = params.anim.axis_len_est;
-    else
-        axis_len_est = 12;
-    end
-
-    if isfield(params,'anim') && isfield(params.anim,'playback_rate')
-        playback_rate = params.anim.playback_rate;
-    else
-        playback_rate = 1.0;
-    end
-
-    if playback_rate <= 0
-        playback_rate = 1.0;
-    end
-
-    p_true = sim.p_true;
-    p_est  = log_p;
-
-    N = numel(t);
-
-    x_true = p_true(2,:);
-    y_true = p_true(1,:);
-    z_true = -p_true(3,:);
-
-    x_est = p_est(2,:);
-    y_est = p_est(1,:);
-    z_est = -p_est(3,:);
-
-    figAnim = figure('Name','UAV-like 3D Animation');
-    axAnim = axes('Parent', figAnim);
-
-    hold(axAnim, 'on');
-    grid(axAnim, 'on');
-    axis(axAnim, 'equal');
-    xlabel(axAnim, 'East [m]');
-    ylabel(axAnim, 'North [m]');
-    zlabel(axAnim, 'Up [m]');
-    view(axAnim, 3);
-
-    xmin = min([x_true x_est]); xmax = max([x_true x_est]);
-    ymin = min([y_true y_est]); ymax = max([y_true y_est]);
-    zmin = min([z_true z_est]); zmax = max([z_true z_est]);
-
-    dx = xmax - xmin; if dx < 1, dx = 1; end
-    dy = ymax - ymin; if dy < 1, dy = 1; end
-    dz = zmax - zmin; if dz < 1, dz = 1; end
-
-    xlim(axAnim, [xmin-0.1*dx, xmax+0.1*dx]);
-    ylim(axAnim, [ymin-0.1*dy, ymax+0.1*dy]);
-    zlim(axAnim, [zmin-0.1*dz, zmax+0.1*dz]);
-
-    hTrailTrue = plot3(axAnim, nan, nan, nan, 'b', 'LineWidth', 1.8);
-    hTrailEst  = plot3(axAnim, nan, nan, nan, '--r', 'LineWidth', 1.6);
-
-    hBodyTrue = plot3(axAnim, nan, nan, nan, 'bo', 'MarkerSize', 7, 'LineWidth', 1.5);
-    hBodyEst  = plot3(axAnim, nan, nan, nan, 'ro', 'MarkerSize', 7, 'LineWidth', 1.5);
-
-    hTx = quiver3(axAnim, 0,0,0,0,0,0,0,'r','LineWidth',1.8);
-    hTy = quiver3(axAnim, 0,0,0,0,0,0,0,'g','LineWidth',1.8);
-    hTz = quiver3(axAnim, 0,0,0,0,0,0,0,'b','LineWidth',1.8);
-
-    hEx = quiver3(axAnim, 0,0,0,0,0,0,0,'r','LineWidth',1.2);
-    hEy = quiver3(axAnim, 0,0,0,0,0,0,0,'g','LineWidth',1.2);
-    hEz = quiver3(axAnim, 0,0,0,0,0,0,0,'b','LineWidth',1.2);
-
-    hNoseTrue = plot3(axAnim, nan, nan, nan, 'b', 'LineWidth', 2.2);
-    hNoseEst  = plot3(axAnim, nan, nan, nan, '--r', 'LineWidth', 1.8);
-
-    legend(axAnim, 'truth trail','estimate trail','truth pos','estimate pos','Location','best');
-
-    t0 = tic;
-
-    for k = 1:step:N
-        i0 = max(1, k-trail_len);
-
-        set(hTrailTrue, 'XData', x_true(i0:k), 'YData', y_true(i0:k), 'ZData', z_true(i0:k));
-        set(hTrailEst,  'XData', x_est(i0:k),  'YData', y_est(i0:k),  'ZData', z_est(i0:k));
-
-        set(hBodyTrue, 'XData', x_true(k), 'YData', y_true(k), 'ZData', z_true(k));
-        set(hBodyEst,  'XData', x_est(k),  'YData', y_est(k),  'ZData', z_est(k));
-
-        [oT, exT, eyT, ezT] = pose_axes_for_plot_local(p_true(:,k), sim.q_true(:,k), axis_len_truth);
-
-        set(hTx, 'XData', oT(1), 'YData', oT(2), 'ZData', oT(3), ...
-                 'UData', exT(1), 'VData', exT(2), 'WData', exT(3));
-        set(hTy, 'XData', oT(1), 'YData', oT(2), 'ZData', oT(3), ...
-                 'UData', eyT(1), 'VData', eyT(2), 'WData', eyT(3));
-        set(hTz, 'XData', oT(1), 'YData', oT(2), 'ZData', oT(3), ...
-                 'UData', ezT(1), 'VData', ezT(2), 'WData', ezT(3));
-
-        [oE, exE, eyE, ezE] = pose_axes_for_plot_local(p_est(:,k), log_q(:,k), axis_len_est);
-
-        set(hEx, 'XData', oE(1), 'YData', oE(2), 'ZData', oE(3), ...
-                 'UData', exE(1), 'VData', exE(2), 'WData', exE(3));
-        set(hEy, 'XData', oE(1), 'YData', oE(2), 'ZData', oE(3), ...
-                 'UData', eyE(1), 'VData', eyE(2), 'WData', eyE(3));
-        set(hEz, 'XData', oE(1), 'YData', oE(2), 'ZData', oE(3), ...
-                 'UData', ezE(1), 'VData', ezE(2), 'WData', ezE(3));
-
-        set(hNoseTrue, 'XData', [oT(1), oT(1)+exT(1)], ...
-                       'YData', [oT(2), oT(2)+exT(2)], ...
-                       'ZData', [oT(3), oT(3)+exT(3)]);
-
-        set(hNoseEst,  'XData', [oE(1), oE(1)+exE(1)], ...
-                       'YData', [oE(2), oE(2)+exE(2)], ...
-                       'ZData', [oE(3), oE(3)+exE(3)]);
-
-        title(axAnim, sprintf('Truth vs estimate UAV motion   |   t = %.2f s', t(k)));
-
-        drawnow limitrate;
-
-        target_elapsed = (t(k) - t(1)) / playback_rate;
-        current_elapsed = toc(t0);
-
-        if current_elapsed < target_elapsed
-            pause(target_elapsed - current_elapsed);
-        end
-    end
-end
+% function animate_uav_compare_local(sim, log_p, log_q, t, params)
+% % Animasyon süresi simülasyon süresiyle senkron akar.
+% % playback_rate = 1.0 ise gerçek zamanlı oynar.
+% 
+%     if isfield(params,'anim') && isfield(params.anim,'step')
+%         step = params.anim.step;
+%     else
+%         step = 5;
+%     end
+% 
+%     if isfield(params,'anim') && isfield(params.anim,'trail_len')
+%         trail_len = params.anim.trail_len;
+%     else
+%         trail_len = 120;
+%     end
+% 
+%     if isfield(params,'anim') && isfield(params.anim,'axis_len_truth')
+%         axis_len_truth = params.anim.axis_len_truth;
+%     else
+%         axis_len_truth = 14;
+%     end
+% 
+%     if isfield(params,'anim') && isfield(params.anim,'axis_len_est')
+%         axis_len_est = params.anim.axis_len_est;
+%     else
+%         axis_len_est = 12;
+%     end
+% 
+%     if isfield(params,'anim') && isfield(params.anim,'playback_rate')
+%         playback_rate = params.anim.playback_rate;
+%     else
+%         playback_rate = 1.0;
+%     end
+% 
+%     if playback_rate <= 0
+%         playback_rate = 1.0;
+%     end
+% 
+%     p_true = sim.p_true;
+%     p_est  = log_p;
+% 
+%     N = numel(t);
+% 
+%     x_true = p_true(2,:);
+%     y_true = p_true(1,:);
+%     z_true = -p_true(3,:);
+% 
+%     x_est = p_est(2,:);
+%     y_est = p_est(1,:);
+%     z_est = -p_est(3,:);
+% 
+%     figAnim = figure('Name','UAV-like 3D Animation');
+%     axAnim = axes('Parent', figAnim);
+% 
+%     hold(axAnim, 'on');
+%     grid(axAnim, 'on');
+%     axis(axAnim, 'equal');
+%     xlabel(axAnim, 'East [m]');
+%     ylabel(axAnim, 'North [m]');
+%     zlabel(axAnim, 'Up [m]');
+%     view(axAnim, 3);
+% 
+%     xmin = min([x_true x_est]); xmax = max([x_true x_est]);
+%     ymin = min([y_true y_est]); ymax = max([y_true y_est]);
+%     zmin = min([z_true z_est]); zmax = max([z_true z_est]);
+% 
+%     dx = xmax - xmin; if dx < 1, dx = 1; end
+%     dy = ymax - ymin; if dy < 1, dy = 1; end
+%     dz = zmax - zmin; if dz < 1, dz = 1; end
+% 
+%     xlim(axAnim, [xmin-0.1*dx, xmax+0.1*dx]);
+%     ylim(axAnim, [ymin-0.1*dy, ymax+0.1*dy]);
+%     zlim(axAnim, [zmin-0.1*dz, zmax+0.1*dz]);
+% 
+%     hTrailTrue = plot3(axAnim, nan, nan, nan, 'b', 'LineWidth', 1.8);
+%     hTrailEst  = plot3(axAnim, nan, nan, nan, '--r', 'LineWidth', 1.6);
+% 
+%     hBodyTrue = plot3(axAnim, nan, nan, nan, 'bo', 'MarkerSize', 7, 'LineWidth', 1.5);
+%     hBodyEst  = plot3(axAnim, nan, nan, nan, 'ro', 'MarkerSize', 7, 'LineWidth', 1.5);
+% 
+%     hTx = quiver3(axAnim, 0,0,0,0,0,0,0,'r','LineWidth',1.8);
+%     hTy = quiver3(axAnim, 0,0,0,0,0,0,0,'g','LineWidth',1.8);
+%     hTz = quiver3(axAnim, 0,0,0,0,0,0,0,'b','LineWidth',1.8);
+% 
+%     hEx = quiver3(axAnim, 0,0,0,0,0,0,0,'r','LineWidth',1.2);
+%     hEy = quiver3(axAnim, 0,0,0,0,0,0,0,'g','LineWidth',1.2);
+%     hEz = quiver3(axAnim, 0,0,0,0,0,0,0,'b','LineWidth',1.2);
+% 
+%     hNoseTrue = plot3(axAnim, nan, nan, nan, 'b', 'LineWidth', 2.2);
+%     hNoseEst  = plot3(axAnim, nan, nan, nan, '--r', 'LineWidth', 1.8);
+% 
+%     legend(axAnim, 'truth trail','estimate trail','truth pos','estimate pos','Location','best');
+% 
+%     t0 = tic;
+% 
+%     for k = 1:step:N
+%         i0 = max(1, k-trail_len);
+% 
+%         set(hTrailTrue, 'XData', x_true(i0:k), 'YData', y_true(i0:k), 'ZData', z_true(i0:k));
+%         set(hTrailEst,  'XData', x_est(i0:k),  'YData', y_est(i0:k),  'ZData', z_est(i0:k));
+% 
+%         set(hBodyTrue, 'XData', x_true(k), 'YData', y_true(k), 'ZData', z_true(k));
+%         set(hBodyEst,  'XData', x_est(k),  'YData', y_est(k),  'ZData', z_est(k));
+% 
+%         [oT, exT, eyT, ezT] = pose_axes_for_plot_local(p_true(:,k), sim.q_true(:,k), axis_len_truth);
+% 
+%         set(hTx, 'XData', oT(1), 'YData', oT(2), 'ZData', oT(3), ...
+%                  'UData', exT(1), 'VData', exT(2), 'WData', exT(3));
+%         set(hTy, 'XData', oT(1), 'YData', oT(2), 'ZData', oT(3), ...
+%                  'UData', eyT(1), 'VData', eyT(2), 'WData', eyT(3));
+%         set(hTz, 'XData', oT(1), 'YData', oT(2), 'ZData', oT(3), ...
+%                  'UData', ezT(1), 'VData', ezT(2), 'WData', ezT(3));
+% 
+%         [oE, exE, eyE, ezE] = pose_axes_for_plot_local(p_est(:,k), log_q(:,k), axis_len_est);
+% 
+%         set(hEx, 'XData', oE(1), 'YData', oE(2), 'ZData', oE(3), ...
+%                  'UData', exE(1), 'VData', exE(2), 'WData', exE(3));
+%         set(hEy, 'XData', oE(1), 'YData', oE(2), 'ZData', oE(3), ...
+%                  'UData', eyE(1), 'VData', eyE(2), 'WData', eyE(3));
+%         set(hEz, 'XData', oE(1), 'YData', oE(2), 'ZData', oE(3), ...
+%                  'UData', ezE(1), 'VData', ezE(2), 'WData', ezE(3));
+% 
+%         set(hNoseTrue, 'XData', [oT(1), oT(1)+exT(1)], ...
+%                        'YData', [oT(2), oT(2)+exT(2)], ...
+%                        'ZData', [oT(3), oT(3)+exT(3)]);
+% 
+%         set(hNoseEst,  'XData', [oE(1), oE(1)+exE(1)], ...
+%                        'YData', [oE(2), oE(2)+exE(2)], ...
+%                        'ZData', [oE(3), oE(3)+exE(3)]);
+% 
+%         title(axAnim, sprintf('Truth vs estimate UAV motion   |   t = %.2f s', t(k)));
+% 
+%         drawnow limitrate;
+% 
+%         target_elapsed = (t(k) - t(1)) / playback_rate;
+%         current_elapsed = toc(t0);
+% 
+%         if current_elapsed < target_elapsed
+%             pause(target_elapsed - current_elapsed);
+%         end
+%     end
+% end
 
 function [origin_plot, ex_plot, ey_plot, ez_plot] = pose_axes_for_plot_local(p_n, q_nb, L)
     R_nb = quat_to_rotmat_local(q_nb);

@@ -21,7 +21,7 @@ function state = inject_error_state(state, dx_hat)
 
     %% Boyut kontrolü
     if ~isvector(dx_hat) || numel(dx_hat) ~= 18
-        error('dx_hat 16 elemanlı olmalıdır: [dp; dv; dtheta; dbg; dba; db_baro; dw_N; dw_E;].');
+        error('dx_hat 18 elemanlı olmalıdır: [dp; dv; dtheta; dbg; dba; db_baro; dw_N; dw_E;].');
     end
 
     dx_hat = dx_hat(:);
