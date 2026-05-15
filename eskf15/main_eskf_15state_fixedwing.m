@@ -24,11 +24,8 @@ save_file = "fixedwing_run_gps_dropout_observability.mat";
 GPS_MEAS_MODE = "windows";
 
 % Resetlenmiş sim zamanı üzerinden saniye cinsinden.
-% Örnek: 120-150 s arası GPS kesintisi istiyorsan:
+% Örnek: 120-150 s arası GPS kesintisi:
 % GPS_MEAS_WINDOWS = [0 120; 150 375];
-%
-% Örnek: İlk 30 s GPS var, 180-220 s tekrar var:
-% GPS_MEAS_WINDOWS = [0 30; 180 220];
 
 GPS_MEAS_WINDOWS = [
     0    120
@@ -37,22 +34,15 @@ GPS_MEAS_WINDOWS = [
 
 %% ---------------- BARO BIAS OBSERVABILITY ----------------
 % Baro bias sadece GPS position height yakın zamanda geldiyse estimate edilir.
-% GPS yokken b_baro freeze kalır.
+% GPS yokken b_baro nominal state olarak son değerde freeze kalır.
 ESTIMATE_BARO_BIAS_WITH_GPS = true;
 
 % GPS 5 Hz civarı. 0.5 s, yaklaşık 2-3 GPS position sample aralığı.
 GPS_HEIGHT_ANCHOR_TIMEOUT_S = 0.50;
 
-% GPS gidince bias state'i freeze edilir.
-BARO_BIAS_FREEZE_STD = 0.05;      % [m]
-
-% GPS geri gelince bias tekrar oynayabilsin diye covariance açılır.
-BARO_BIAS_REACQUIRE_STD = 1.0;    % [m]
-
-%% ---------------- GPS OUTAGE COVARIANCE HANDLING ----------------
-GPS_OUTAGE_POS_INFLATE_NE = [6.0; 12.0];      % [m]
-GPS_OUTAGE_VEL_INFLATE_NE = [1.0; 1.2];       % [m/s]
-
+%% ---------------- GPS OUTAGE PROCESS-NOISE HANDLING ----------------
+% P'ye elle müdahale yok.
+% GPS yokken covariance Qd üzerinden kendi büyüsün diye process noise artırılır.
 GPS_OUTAGE_SIGMA_A_SCALE     = 3.0;
 GPS_OUTAGE_SIGMA_G_SCALE     = 1.5;
 GPS_OUTAGE_SIGMA_BA_RW_SCALE = 4.0;
@@ -109,6 +99,14 @@ params.max_airspeed_update_rate_hz = 30;
 
 params.use_joseph_form = true;
 
+%% Innovation gates
+% 3D measurements için chi-square benzeri gate.
+% Scalar measurements için residual^2 / S gate.
+params.gps_pos_gate_chi2 = 25.0;
+params.gps_vel_gate_chi2 = 25.0;
+params.baro_gate_chi2    = 9.0;
+params.tas_gate_chi2     = 9.0;
+
 %% ============================================================
 % 2) Build sim from fixed-wing MAT
 % ============================================================
@@ -140,9 +138,9 @@ fprintf('Expected GPS active samples    : %d / %d\n', sum(tmp_use_gps), N);
 % 2.5) Barometer bias initial value
 % ============================================================
 
-% Bu deneyde başta kalibrasyon yok.
-% b_baro = 0 başlıyor, GPS measurement pencerelerinde öğreniliyor,
-% GPS gidince freeze ediliyor.
+% Başta kalibrasyon yok.
+% b_baro = 0 başlar, GPS measurement pencerelerinde öğrenilir,
+% GPS gidince nominal state son değerde freeze edilir.
 b_baro0 = 0;
 
 fprintf('[fixedwing main] Dynamic GPS dropout test: b_baro starts at zero.\n');
@@ -183,10 +181,7 @@ end
 state.b_g = [0;0;0];
 state.b_a = [0;0;0];
 
-% 16th nominal state
 state.b_baro = b_baro0;
-
-% 17-18th nominal states
 state.wind_ne = [0;0];
 
 fprintf('[fixedwing main] Initial p = [%.3f %.3f %.3f]^T m\n', state.p_n);
@@ -255,10 +250,25 @@ log_res_airspeed = nan(1,N);
 log_use_gps_meas = false(1,N);
 log_estimate_baro_bias = false(1,N);
 
+log_gate_gps_pos = false(1,N);
+log_gate_gps_vel = false(1,N);
+log_gate_baro = false(1,N);
+log_gate_airspeed = false(1,N);
+
 used_gps_pos_updates = 0;
 used_gps_vel_updates = 0;
 used_baro_updates = 0;
 used_airspeed_updates = 0;
+
+accepted_gps_pos_updates = 0;
+accepted_gps_vel_updates = 0;
+accepted_baro_updates = 0;
+accepted_airspeed_updates = 0;
+
+rejected_gps_pos_updates = 0;
+rejected_gps_vel_updates = 0;
+rejected_baro_updates = 0;
+rejected_airspeed_updates = 0;
 
 log_p(:,1) = state.p_n;
 log_v(:,1) = state.v_n;
@@ -319,37 +329,18 @@ for k = 2:N
     %% ---------------- GPS measurement schedule ----------------
     use_gps_meas_now = is_gps_schedule_active(sim.t(k), GPS_MEAS_MODE, GPS_MEAS_WINDOWS);
 
-    % GPS ON -> OFF:
-    % b_baro artık gözlenebilir değil, o andaki değeri freeze ediyoruz.
-    % Aynı anda yatay P şişiriyoruz, çünkü GPS yokken N/E drift beklenir.
     if prev_use_gps_meas && ~use_gps_meas_now
         baro_bias_hold_value = state.b_baro;
-
-        P(16,:) = 0;
-        P(:,16) = 0;
-        P(16,16) = BARO_BIAS_FREEZE_STD^2;
-
-        % GPS outage covariance inflation
-        P(1:2,1:2) = P(1:2,1:2) + diag(GPS_OUTAGE_POS_INFLATE_NE.^2);
-        P(4:5,4:5) = P(4:5,4:5) + diag(GPS_OUTAGE_VEL_INFLATE_NE.^2);
-        P = 0.5 * (P + P.');
 
         fprintf('[fixedwing main] t=%.2f s: GPS OFF, freezing b_baro = %.6f m\n', ...
             sim.t(k), baro_bias_hold_value);
     end
 
-    % GPS OFF -> ON:
-    % Bias tekrar gözlenebilir olacak. Covariance'ı biraz açıyoruz.
     if ~prev_use_gps_meas && use_gps_meas_now
-        P(16,:) = 0;
-        P(:,16) = 0;
-        P(16,16) = BARO_BIAS_REACQUIRE_STD^2;
-
         fprintf('[fixedwing main] t=%.2f s: GPS ON, re-enabling b_baro estimation\n', ...
             sim.t(k));
     end
 
-    % GPS yokken bias gerçekten sabit kalsın.
     if ~use_gps_meas_now
         state.b_baro = baro_bias_hold_value;
     end
@@ -357,8 +348,6 @@ for k = 2:N
     %% ---------------- Per-step params ----------------
     params_k = params;
 
-    % GPS yokken process noise artırılır.
-    % Ama baro bias random walk kapatılır, çünkü b_baro freeze.
     if ~use_gps_meas_now
         params_k.sigma_baro_bias_rw = 0.0;
 
@@ -383,10 +372,18 @@ for k = 2:N
         z_gps_pos = sim.gps_pos(:,k);
 
         if all(isfinite(z_gps_pos))
-            [state, P, residual, ~, ~] = update_gnss_pos(state, P, z_gps_pos, params_k);
+            [state, P, residual, ~, ~, accepted] = update_gnss_pos(state, P, z_gps_pos, params_k);
+
             log_res_gps_pos(:,k) = residual;
             used_gps_pos_updates = used_gps_pos_updates + 1;
-            last_gps_pos_update_t = sim.t(k);
+
+            if accepted
+                accepted_gps_pos_updates = accepted_gps_pos_updates + 1;
+                last_gps_pos_update_t = sim.t(k);
+            else
+                rejected_gps_pos_updates = rejected_gps_pos_updates + 1;
+                log_gate_gps_pos(k) = true;
+            end
         end
     end
 
@@ -395,17 +392,22 @@ for k = 2:N
         z_gps_vel = sim.gps_vel(:,k);
 
         if all(isfinite(z_gps_vel))
-            [state, P, residual, ~, ~] = update_gnss_vel(state, P, z_gps_vel, params_k);
+            [state, P, residual, ~, ~, accepted] = update_gnss_vel(state, P, z_gps_vel, params_k);
+
             log_res_gps_vel(:,k) = residual;
             used_gps_vel_updates = used_gps_vel_updates + 1;
-            last_gps_vel_update_t = sim.t(k);
+
+            if accepted
+                accepted_gps_vel_updates = accepted_gps_vel_updates + 1;
+                last_gps_vel_update_t = sim.t(k);
+            else
+                rejected_gps_vel_updates = rejected_gps_vel_updates + 1;
+                log_gate_gps_vel(k) = true;
+            end
         end
     end
 
     %% ---------------- Is baro bias observable now? ----------------
-    % Hz farkı burada önemli:
-    % GPS 5 Hz, baro ~20 Hz kullanılıyor.
-    % Baro bias'ı sadece son GPS position height update'i yakın zamandaysa açıyoruz.
     gps_height_recent = use_gps_meas_now && ...
         ((sim.t(k) - last_gps_pos_update_t) <= GPS_HEIGHT_ANCHOR_TIMEOUT_S);
 
@@ -425,11 +427,18 @@ for k = 2:N
             z_baro = sim.baro(k);
 
             if isfinite(z_baro)
-                [state, P, residual, ~, ~] = update_baro(state, P, z_baro, params_k);
+                [state, P, residual, ~, ~, accepted] = update_baro(state, P, z_baro, params_k);
 
                 log_res_baro(k) = residual;
                 used_baro_updates = used_baro_updates + 1;
                 last_baro_update_t = sim.t(k);
+
+                if accepted
+                    accepted_baro_updates = accepted_baro_updates + 1;
+                else
+                    rejected_baro_updates = rejected_baro_updates + 1;
+                    log_gate_baro(k) = true;
+                end
             end
         end
     end
@@ -442,24 +451,27 @@ for k = 2:N
             z_tas = sim.airspeed(k);
 
             if isfinite(z_tas) && z_tas > 3
-                [state, P, residual, ~, ~] = update_airspeed(state, P, z_tas, params_k);
+                [state, P, residual, ~, ~, accepted] = update_airspeed(state, P, z_tas, params_k);
 
                 if isfinite(residual)
                     log_res_airspeed(k) = residual;
                     used_airspeed_updates = used_airspeed_updates + 1;
                     last_airspeed_update_t = sim.t(k);
+
+                    if accepted
+                        accepted_airspeed_updates = accepted_airspeed_updates + 1;
+                    else
+                        rejected_airspeed_updates = rejected_airspeed_updates + 1;
+                        log_gate_airspeed(k) = true;
+                    end
                 end
             end
         end
     end
 
-    %% ---------------- Enforce b_baro freeze during GPS outage ----------------
+    %% ---------------- Enforce nominal b_baro freeze during GPS outage ----------------
     if ~use_gps_meas_now
         state.b_baro = baro_bias_hold_value;
-
-        P(16,:) = 0;
-        P(:,16) = 0;
-        P(16,16) = BARO_BIAS_FREEZE_STD^2;
     end
 
     %% ---------------- Logging ----------------
@@ -649,15 +661,25 @@ end
 fprintf('\n--- UPDATE COUNTS ---\n');
 fprintf('GPS pos updates available : %d\n', sum(sim.gps_pos_available));
 fprintf('GPS pos updates used      : %d\n', used_gps_pos_updates);
+fprintf('GPS pos updates accepted  : %d\n', accepted_gps_pos_updates);
+fprintf('GPS pos updates rejected  : %d\n', rejected_gps_pos_updates);
+
 fprintf('GPS vel updates available : %d\n', sum(sim.gps_vel_available));
 fprintf('GPS vel updates used      : %d\n', used_gps_vel_updates);
+fprintf('GPS vel updates accepted  : %d\n', accepted_gps_vel_updates);
+fprintf('GPS vel updates rejected  : %d\n', rejected_gps_vel_updates);
+
 fprintf('BARO updates available    : %d\n', sum(sim.baro_available & isfinite(sim.baro)));
 fprintf('BARO updates used         : %d\n', used_baro_updates);
+fprintf('BARO updates accepted     : %d\n', accepted_baro_updates);
+fprintf('BARO updates rejected     : %d\n', rejected_baro_updates);
 
 if isfield(sim, "airspeed_available")
     fprintf('Airspeed updates available : %d\n', sum(sim.airspeed_available));
 end
 fprintf('Airspeed updates used      : %d\n', used_airspeed_updates);
+fprintf('Airspeed updates accepted  : %d\n', accepted_airspeed_updates);
+fprintf('Airspeed updates rejected  : %d\n', rejected_airspeed_updates);
 
 fprintf('GPS measurement scheduled samples       : %d\n', sum(log_use_gps_meas));
 fprintf('Baro bias estimated samples             : %d\n', sum(log_estimate_baro_bias));
@@ -678,11 +700,13 @@ fprintf('ATT DEBUG INIT : %d\n', USE_ATT_INIT_FOR_DEBUG);
 fprintf('GPS_MEAS_MODE  : %s\n', GPS_MEAS_MODE);
 fprintf('GPS_HEIGHT_ANCHOR_TIMEOUT_S : %.3f\n', GPS_HEIGHT_ANCHOR_TIMEOUT_S);
 fprintf('EST BARO BIAS WITH GPS      : %d\n', ESTIMATE_BARO_BIAS_WITH_GPS);
-fprintf('GPS_OUTAGE_POS_INFLATE_NE   : [%.3f %.3f]\n', GPS_OUTAGE_POS_INFLATE_NE);
-fprintf('GPS_OUTAGE_VEL_INFLATE_NE   : [%.3f %.3f]\n', GPS_OUTAGE_VEL_INFLATE_NE);
 fprintf('GPS_OUTAGE_SIGMA_A_SCALE     : %.3f\n', GPS_OUTAGE_SIGMA_A_SCALE);
 fprintf('GPS_OUTAGE_SIGMA_G_SCALE     : %.3f\n', GPS_OUTAGE_SIGMA_G_SCALE);
 fprintf('GPS_OUTAGE_SIGMA_BA_RW_SCALE : %.3f\n', GPS_OUTAGE_SIGMA_BA_RW_SCALE);
+fprintf('gps_pos_gate_chi2 : %.3f\n', params.gps_pos_gate_chi2);
+fprintf('gps_vel_gate_chi2 : %.3f\n', params.gps_vel_gate_chi2);
+fprintf('baro_gate_chi2    : %.3f\n', params.baro_gate_chi2);
+fprintf('tas_gate_chi2     : %.3f\n', params.tas_gate_chi2);
 fprintf('sigma_gps_pos  : [%.3f %.3f %.3f]\n', params.sigma_gps_pos);
 fprintf('sigma_gps_vel  : [%.3f %.3f %.3f]\n', params.sigma_gps_vel);
 fprintf('sigma_baro     : %.3f\n', params.sigma_baro);
@@ -770,6 +794,17 @@ if any(idx_gps_pos_holdout)
     title('GPS Position Holdout Error During GPS Dropout');
 end
 
+figure('Name','Innovation Gate Flags');
+plot(t, double(log_gate_gps_pos), 'LineWidth', 1.0); hold on;
+plot(t, double(log_gate_gps_vel), 'LineWidth', 1.0);
+plot(t, double(log_gate_baro), 'LineWidth', 1.0);
+plot(t, double(log_gate_airspeed), 'LineWidth', 1.0);
+grid on;
+xlabel('Time [s]');
+ylabel('Gate rejected flag');
+legend('GPS pos','GPS vel','Baro','TAS','Location','best');
+title('Innovation Gate Rejections');
+
 %% ============================================================
 % 12) Save run output
 % ============================================================
@@ -784,6 +819,7 @@ if SAVE_RUN_OUTPUT
         "log_bg", "log_ba", "log_bbaro", "log_wind_ne", "log_Pdiag", ...
         "log_res_gps_pos", "log_res_gps_vel", "log_res_baro", "log_res_airspeed", ...
         "log_use_gps_meas", "log_estimate_baro_bias", ...
+        "log_gate_gps_pos", "log_gate_gps_vel", "log_gate_baro", "log_gate_airspeed", ...
         "gps_pos_rmse", "gps_pos_rmse_norm", ...
         "gps_vel_rmse", "gps_vel_rmse_norm", ...
         "gps_pos_rmse_used", "gps_pos_rmse_used_norm", ...
@@ -797,12 +833,14 @@ if SAVE_RUN_OUTPUT
         "wind_ref_rmse", "wind_ref_rmse_norm", "wind_ref_mean_error", ...
         "used_gps_pos_updates", "used_gps_vel_updates", ...
         "used_baro_updates", "used_airspeed_updates", ...
+        "accepted_gps_pos_updates", "accepted_gps_vel_updates", ...
+        "accepted_baro_updates", "accepted_airspeed_updates", ...
+        "rejected_gps_pos_updates", "rejected_gps_vel_updates", ...
+        "rejected_baro_updates", "rejected_airspeed_updates", ...
         "USE_BARO", "USE_AIRSPEED", "USE_ATT_INIT_FOR_DEBUG", ...
         "GPS_MEAS_MODE", "GPS_MEAS_WINDOWS", ...
         "GPS_HEIGHT_ANCHOR_TIMEOUT_S", ...
         "ESTIMATE_BARO_BIAS_WITH_GPS", ...
-        "BARO_BIAS_FREEZE_STD", "BARO_BIAS_REACQUIRE_STD", ...
-        "GPS_OUTAGE_POS_INFLATE_NE", "GPS_OUTAGE_VEL_INFLATE_NE", ...
         "GPS_OUTAGE_SIGMA_A_SCALE", "GPS_OUTAGE_SIGMA_G_SCALE", ...
         "GPS_OUTAGE_SIGMA_BA_RW_SCALE", ...
         "USE_COMBINED_PX4_REFERENCE", ...

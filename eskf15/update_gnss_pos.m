@@ -1,60 +1,58 @@
-function [state, P, residual, S, K] = update_gnss_pos(state, P, z_gps_pos, params)
+function [state, P, residual, S, K, accepted] = update_gnss_pos(state, P, z_gps_pos, params)
 %UPDATE_GNSS_POS
-% GNSS position update for 18-state ESKF.
+% 18-state ESKF GNSS position update with innovation gate.
 %
-% Measurement model:
-%   z_gps_pos = p_n + noise
+% Measurement:
+%   z = p_n + noise
 %
 % Error-state:
 %   dx = [dp; dv; dtheta; dbg; dba; db_baro; dw_N; dw_E]
-%
-% H:
-%   H(:,1:3) = I3
-%
-% Baro offset ve wind state bu ölçümde direkt gözlenmez.
 
-    %% Boyut kontrolleri
+    accepted = true;
+
     if ~isequal(size(P), [18 18])
         error('P 18x18 olmalıdır.');
     end
 
-    if ~isvector(z_gps_pos) || numel(z_gps_pos) ~= 3
-        error('z_gps_pos 3 elemanlı olmalıdır.');
-    end
-
     z_gps_pos = z_gps_pos(:);
 
-    if any(~isfinite(z_gps_pos))
-        error('z_gps_pos sonlu değerlerden oluşmalıdır.');
+    if numel(z_gps_pos) ~= 3 || any(~isfinite(z_gps_pos))
+        error('z_gps_pos 3x1 sonlu vektör olmalıdır.');
     end
 
-    %% Measurement prediction
     z_hat = state.p_n(:);
-
     residual = z_gps_pos - z_hat;
 
-    %% Measurement Jacobian
     H = zeros(3,18);
     H(:,1:3) = eye(3);
 
-    %% Measurement covariance
     if isfield(params, 'R_gps_pos')
         R = params.R_gps_pos;
     elseif isfield(params, 'sigma_gps_pos')
         R = diag(params.sigma_gps_pos(:).^2);
     else
-        R = diag([2.0; 2.0; 3.0].^2);
+        R = diag([3;3;5].^2);
     end
 
-    %% Kalman update
     S = H * P * H.' + R;
+    S = 0.5 * (S + S.');
+
     K = P * H.' / S;
+
+    d2 = residual.' / S * residual;
+
+    if isfield(params, 'gps_pos_gate_chi2') && isfinite(params.gps_pos_gate_chi2)
+        if d2 > params.gps_pos_gate_chi2
+            accepted = false;
+            K = zeros(size(P,1), size(H,1));
+            return;
+        end
+    end
 
     dx_hat = K * residual;
 
     state = inject_error_state(state, dx_hat);
 
-    %% Covariance update
     I = eye(18);
 
     if isfield(params, 'use_joseph_form') && params.use_joseph_form

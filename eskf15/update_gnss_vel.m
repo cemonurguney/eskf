@@ -1,60 +1,55 @@
-function [state, P, residual, S, K] = update_gnss_vel(state, P, z_gps_vel, params)
+function [state, P, residual, S, K, accepted] = update_gnss_vel(state, P, z_gps_vel, params)
 %UPDATE_GNSS_VEL
-% GNSS velocity update for 18-state ESKF.
+% 18-state ESKF GNSS velocity update with innovation gate.
 %
-% Measurement model:
-%   z_gps_vel = v_n + noise
-%
-% Error-state:
-%   dx = [dp; dv; dtheta; dbg; dba; db_baro; dw_N; dw_E]
-%
-% H:
-%   H(:,4:6) = I3
-%
-% Wind state burada direkt ölçülmez. GPS velocity ground velocity ölçer.
+% Measurement:
+%   z = v_n + noise
 
-    %% Boyut kontrolleri
+    accepted = true;
+
     if ~isequal(size(P), [18 18])
         error('P 18x18 olmalıdır.');
     end
 
-    if ~isvector(z_gps_vel) || numel(z_gps_vel) ~= 3
-        error('z_gps_vel 3 elemanlı olmalıdır.');
-    end
-
     z_gps_vel = z_gps_vel(:);
 
-    if any(~isfinite(z_gps_vel))
-        error('z_gps_vel sonlu değerlerden oluşmalıdır.');
+    if numel(z_gps_vel) ~= 3 || any(~isfinite(z_gps_vel))
+        error('z_gps_vel 3x1 sonlu vektör olmalıdır.');
     end
 
-    %% Measurement prediction
     z_hat = state.v_n(:);
-
     residual = z_gps_vel - z_hat;
 
-    %% Measurement Jacobian
     H = zeros(3,18);
     H(:,4:6) = eye(3);
 
-    %% Measurement covariance
     if isfield(params, 'R_gps_vel')
         R = params.R_gps_vel;
     elseif isfield(params, 'sigma_gps_vel')
         R = diag(params.sigma_gps_vel(:).^2);
     else
-        R = diag([0.5; 0.5; 0.8].^2);
+        R = diag([0.5;0.5;0.8].^2);
     end
 
-    %% Kalman update
     S = H * P * H.' + R;
+    S = 0.5 * (S + S.');
+
     K = P * H.' / S;
+
+    d2 = residual.' / S * residual;
+
+    if isfield(params, 'gps_vel_gate_chi2') && isfinite(params.gps_vel_gate_chi2)
+        if d2 > params.gps_vel_gate_chi2
+            accepted = false;
+            K = zeros(size(P,1), size(H,1));
+            return;
+        end
+    end
 
     dx_hat = K * residual;
 
     state = inject_error_state(state, dx_hat);
 
-    %% Covariance update
     I = eye(18);
 
     if isfield(params, 'use_joseph_form') && params.use_joseph_form

@@ -1,25 +1,23 @@
-function [state, P, residual, S, K] = update_baro(state, P, z_baro, params)
+function [state, P, residual, S, K, accepted] = update_baro(state, P, z_baro, params)
 %UPDATE_BARO
-% Barometer update for 18-state ESKF with optionally estimated barometer offset.
+% Barometer update for 18-state ESKF with optional barometer offset estimation.
 %
 % Measurement model:
 %   z_baro = p_D + b_baro + noise
 %
-% Error-state:
-%   dx = [dp; dv; dtheta; dbg; dba; db_baro; dw_N; dw_E]
-%
 % If params.estimate_baro_bias = true:
-%   H(3)  = 1   -> Down position
-%   H(16) = 1   -> barometer offset
+%   H(3)  = 1
+%   H(16) = 1
 %
 % If params.estimate_baro_bias = false:
 %   H(3)  = 1
 %   H(16) = 0
 %
-% In the second case, b_baro is used as a fixed compensation term, not
-% estimated by the measurement update.
+% In the second case, b_baro is used as fixed compensation in z_hat,
+% but the baro measurement does not directly estimate db_baro.
 
-    %% Boyut kontrolleri
+    accepted = true;
+
     if ~isequal(size(P), [18 18])
         error('P 18x18 olmalıdır.');
     end
@@ -32,12 +30,9 @@ function [state, P, residual, S, K] = update_baro(state, P, z_baro, params)
         state.b_baro = 0;
     end
 
-    %% Measurement prediction
     z_hat = state.p_n(3) + state.b_baro;
-
     residual = z_baro - z_hat;
 
-    %% Measurement Jacobian
     H = zeros(1,18);
     H(3) = 1;
 
@@ -47,24 +42,31 @@ function [state, P, residual, S, K] = update_baro(state, P, z_baro, params)
         H(16) = 0;
     end
 
-    %% Measurement covariance
     if isfield(params, 'R_baro')
         R = params.R_baro;
     elseif isfield(params, 'sigma_baro')
         R = params.sigma_baro^2;
     else
-        R = 2.5^2;
+        R = 3.0^2;
     end
 
-    %% Kalman update
     S = H * P * H.' + R;
     K = P * H.' / S;
+
+    d2 = residual^2 / S;
+
+    if isfield(params, 'baro_gate_chi2') && isfinite(params.baro_gate_chi2)
+        if d2 > params.baro_gate_chi2
+            accepted = false;
+            K = zeros(size(P,1), 1);
+            return;
+        end
+    end
 
     dx_hat = K * residual;
 
     state = inject_error_state(state, dx_hat);
 
-    %% Covariance update
     I = eye(18);
 
     if isfield(params, 'use_joseph_form') && params.use_joseph_form
