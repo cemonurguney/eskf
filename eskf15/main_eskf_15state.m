@@ -30,6 +30,12 @@ clear; clc; close all;
 
 [state, ~, params] = init_filter();
 
+%% ---------------- Script paths ----------------
+scriptDir = string(fileparts(mfilename("fullpath")));
+if strlength(scriptDir) == 0
+    scriptDir = string(pwd);
+end
+
 %% ---------------- USER FLAGS ----------------
 USE_BARO = true;
 USE_GPS_VEL = true;
@@ -42,6 +48,27 @@ USE_OBSERVABILITY_ANALYSIS = true;
 
 SAVE_RUN_OUTPUT = true;
 save_file = "synthetic_fixedwing_like_run.mat";
+
+SAVE_FIGURES = true;             % true: figure export aktif
+SAVE_ONLY_FINAL_FIGS = false;    % true: sadece listelenen final figure'lar kaydedilir
+SAVE_FIG_FORMATS = ["png"];      % sentetik main icin varsayilan PNG
+
+FINAL_FIGURES_ALWAYS = [ ...
+    "3D Trajectory"
+    "Position NED"
+    "Velocity NED"
+    "Attitude"
+    "Gyro Bias"
+    "Accel Bias"
+    "Covariance Diagonal Groups"
+    "Measurement Residuals"
+    "Observation Consistency Errors"
+    "Observability Analysis"
+    "Synthetic GPS Schedule and Baro Bias"
+    "Synthetic Innovation Gate Flags"
+    "Synthetic Estimated Wind"
+    "Synthetic Airspeed Residual"
+];
 
 %% ---------------- GPS MEASUREMENT SCHEDULE ----------------
 % "always"  : GPS position + GPS velocity tüm koşu boyunca açık
@@ -73,16 +100,23 @@ GPS_OUTAGE_SIGMA_BA_RW_SCALE = 4.0;
 %% ============================================================
 % 1.5) Synthetic fixed-wing-like 18-state tuning
 % ============================================================
+%
+% Bu main dosyası, patched simulate_truth_and_sensors.m içindeki
+% generate_fixedwing_like_truth() fonksiyonuyla beraber kullanılacak şekilde
+% ayarlandı.
+%
+% Hedef:
+%   - Gerçek logun birebir kopyası değil.
+%   - Fixed-wing için mantıklı TAS / roll / pitch / wind ölçeği.
+%   - Wind + TAS observability için yeterli dönüş ve hız değişimi.
+%   - Sensör noise tarafında filtreyi gereksiz yere dövmeyen ama gerçekçi R.
 
 params.sensor_profile = 'Synthetic Fixed-Wing-Like: IMU + GPS + baro + TAS';
 
-%% Fixed-wing-like simulation timing
-params.sim.dt = 0.004;      % 250 Hz
-params.sim.T_end = 375.0;   % [s]
-
-%% Frame
-% Fixed-wing data hattıyla aynı: NED.
-params.g_n = [0; 0; 9.81];
+%% Frame / timing
+params.g_n = [0; 0; 9.81];       % NED: D positive down
+params.sim.dt = 0.004;           % 250 Hz IMU-like truth grid
+params.sim.T_end = 375.0;
 
 %% Required truth defaults
 params.truth.bg0 = [0; 0; 0];
@@ -91,27 +125,23 @@ params.truth.ba0 = [0; 0; 0];
 %% Fixed-wing-like truth scenario
 params.truth.scenario_mode = "fixedwing_like";
 
-params.truth.fixedwing.p0_ned = [54.0; -137.9; -15.9];  % [N;E;D] m
+% Initial position: [N; E; D] m. D negative means above local origin.
+% Real logun birebir başlangıcı değil; sadece makul uçuş irtifası.
+params.truth.fixedwing.p0_ned = [0.0; 0.0; -45.0];
 
-% Airspeed profile. Real fixed-wing datasındaki TAS bandına yakın.
-params.truth.fixedwing.Va_trim = 14.0;     % [m/s]
-params.truth.fixedwing.Va_amp1 = 1.8;      % [m/s]
-params.truth.fixedwing.Va_amp2 = 0.7;      % [m/s]
+% Airspeed profile bounds. Patched truth generator Va'yı bu aralıkta clamp eder.
+params.truth.fixedwing.Va_trim = 14.5;     % [m/s]
+params.truth.fixedwing.Va_min  = 10.5;     % [m/s]
+params.truth.fixedwing.Va_max  = 18.5;     % [m/s]
 
-% Heading / turn profile.
-params.truth.fixedwing.yaw0_deg = 35.0;
-params.truth.fixedwing.yaw_rate_base_deg_s = 0.35;
-params.truth.fixedwing.yaw_amp1_deg = 22.0;
-params.truth.fixedwing.yaw_freq1 = 0.020;
-params.truth.fixedwing.yaw_amp2_deg = 7.0;
-params.truth.fixedwing.yaw_freq2 = 0.060;
+% Heading / maneuver profile. Generator içinde loiter/racetrack/S-turn benzeri
+% schedule üretir; bu değerler sınır ve başlangıç yönünü belirler.
+params.truth.fixedwing.yaw0_deg = -80.0;
+params.truth.fixedwing.max_yaw_rate_deg_s = 32.0;
 
-% Vertical profile. D positive down, so climb/descent small.
-params.truth.fixedwing.gamma_amp_deg = 3.0;
-params.truth.fixedwing.gamma_freq = 0.018;
-
-% Roll clamp, coordinated-turn benzeri bank.
-params.truth.fixedwing.max_roll_deg = 35.0;
+% Vertical motion / bank limits.
+params.truth.fixedwing.max_gamma_deg = 8.0;
+params.truth.fixedwing.max_roll_deg  = 45.0;
 
 %% IMU noise, fixed-wing real-like
 params.sigma_g = deg2rad(0.20);
@@ -126,45 +156,47 @@ params.synthetic_baro_rate_hz = 20;
 params.synthetic_airspeed_rate_hz = 20;
 
 %% GPS noise, fixed-wing real-like
-params.sigma_gps_pos = [3.0; 3.0; 5.0];
+% Eski [3 3 5] / [0.50 0.50 0.80] çok kaba kalıyordu.
+% Hala noisy, ama filtreyi sensör gürültüsüyle gereksiz yere boğmuyor.
+params.sigma_gps_pos = [2.0; 2.0; 3.0];
 params.R_gps_pos = diag(params.sigma_gps_pos.^2);
 
-params.sigma_gps_vel = [0.50; 0.50; 0.80];
+params.sigma_gps_vel = [0.35; 0.35; 0.50];
 params.R_gps_vel = diag(params.sigma_gps_vel.^2);
 
 %% Baro noise / bias
-params.sigma_baro = 3.0;
+params.sigma_baro = 1.5;
 params.R_baro = params.sigma_baro^2;
 
 % True synthetic baro bias.
 params.truth.b_baro0 = 6.0;
 params.truth.b_baro_rw = 0.002;
 
-% Filter-side baro bias uncertainty.
-params.sigma_baro_bias0 = 12.0;
-params.sigma_baro_bias_rw = 0.01;
+% Filter-side baro bias uncertainty / random walk.
+params.sigma_baro_bias0 = 10.0;
+params.sigma_baro_bias_rw = 0.003;
 
 params.max_baro_update_rate_hz = 20;
 params.estimate_baro_bias = false;
 
 %% Wind + TAS
 params.synthetic.enable_wind_tas = USE_AIRSPEED;
-params.synthetic.wind_mode = "slow_sine";
 params.synthetic.wind_seed = 42;
 
-% Fixed-wing-like wind, N/E.
-params.synthetic.wind_base_ne = [2.0; -1.2];
-params.synthetic.wind_amp_ne = [0.4; 0.3];
-params.synthetic.wind_freq_ne = [0.030; 0.025];
+% Gerçek fixed-wing log ölçeğine yakın ama aynı olmayan nominal wind.
+% Patched truth generator bu base etrafında yavaş değişen wind üretir.
+params.synthetic.wind_base_ne = [0.65; -0.85];
 
-% Fixed-wing real run ile aynı seviyeye yakın.
-params.sigma_tas = 2.5;
+% TAS measurement noise. Eski 2.5 m/s yüzünden 14 m/s truth'tan 4 m/s
+% gibi uçak-olmayan measurement çıkabiliyordu. Buna gerek yok, medeniyet çöktü zaten.
+params.sigma_tas = 1.0;
 params.R_tas = params.sigma_tas^2;
 
 params.max_airspeed_update_rate_hz = 20;
 
-params.sigma_wind0 = [8.0; 8.0];
-params.sigma_wind_rw = 0.02;
+% Wind state prior / random walk
+params.sigma_wind0 = [4.0; 4.0];
+params.sigma_wind_rw = 0.020;
 
 params.use_joseph_form = true;
 
@@ -812,9 +844,36 @@ if SAVE_RUN_OUTPUT
         "ESTIMATE_BARO_BIAS_WITH_GPS", ...
         "GPS_OUTAGE_SIGMA_A_SCALE", "GPS_OUTAGE_SIGMA_G_SCALE", ...
         "GPS_OUTAGE_SIGMA_BA_RW_SCALE", ...
+        "SAVE_FIGURES", "SAVE_ONLY_FINAL_FIGS", "SAVE_FIG_FORMATS", ...
         "params", "-v7.3");
 
     fprintf("[main synthetic] Saved: %s\n", save_file);
+end
+
+%% ============================================================
+% 12) Save figures, optional
+% ============================================================
+
+if SAVE_FIGURES
+    figRoot = fullfile(scriptDir, "figures_saved");
+    runTag = "synthetic_fixedwing_eskf_" + string(GPS_MEAS_MODE) + "_" + ...
+        string(datetime("now", "Format", "yyyyMMdd_HHmmss"));
+    figDir = fullfile(figRoot, runTag);
+
+    finalFigureNames = FINAL_FIGURES_ALWAYS;
+
+    if SAVE_ONLY_FINAL_FIGS
+        close_non_final_figures(finalFigureNames);
+    end
+
+    save_final_open_figures( ...
+        figDir, ...
+        char("synthetic_fixedwing_eskf_" + string(GPS_MEAS_MODE)), ...
+        SAVE_FIG_FORMATS);
+
+    fprintf("[main synthetic] Figures saved to:\n%s\n", figDir);
+else
+    fprintf("[main synthetic] SAVE_FIGURES = false, figure export skipped.\n");
 end
 
 %% ============================================================
@@ -846,4 +905,165 @@ function active = is_gps_schedule_active(t_now, mode, windows)
         otherwise
             error('Unknown GPS_MEAS_MODE: %s', mode);
     end
+end
+
+function close_non_final_figures(keepNames)
+    %CLOSE_NON_FINAL_FIGURES
+    % keepNames icinde olmayan figure'lari kapatir.
+    keepNames = string(keepNames);
+    figs = findobj(groot, "Type", "figure");
+
+    for i = 1:numel(figs)
+        fig = figs(i);
+
+        if isempty(fig) || ~isvalid(fig)
+            continue;
+        end
+
+        try
+            figName = string(fig.Name);
+        catch
+            figName = "";
+        end
+
+        keep = false;
+
+        for k = 1:numel(keepNames)
+            if contains(lower(figName), lower(keepNames(k)))
+                keep = true;
+                break;
+            end
+        end
+
+        if ~keep
+            fprintf("[main synthetic] Closing non-final figure: %s\n", figName);
+            close(fig);
+        end
+    end
+end
+
+function save_final_open_figures(outDir, prefix, formats)
+    %SAVE_FINAL_OPEN_FIGURES
+    % Acik kalan figure'lari istenen formatlarda kaydeder.
+
+    if nargin < 1 || strlength(string(outDir)) == 0
+        outDir = fullfile(pwd, "figures_saved");
+    end
+
+    if nargin < 2 || strlength(string(prefix)) == 0
+        prefix = "fig";
+    end
+
+    if nargin < 3 || isempty(formats)
+        formats = ["png"];
+    end
+
+    formats = string(formats);
+
+    if ~exist(outDir, "dir")
+        mkdir(outDir);
+    end
+
+    figs = findobj(groot, "Type", "figure");
+
+    if isempty(figs)
+        warning("Kaydedilecek acik figure bulunamadi.");
+        return;
+    end
+
+    figNums = nan(numel(figs), 1);
+
+    for i = 1:numel(figs)
+        if isvalid(figs(i)) && isprop(figs(i), "Number")
+            figNums(i) = figs(i).Number;
+        else
+            figNums(i) = inf;
+        end
+    end
+
+    [~, idx] = sort(figNums, "ascend");
+    figs = figs(idx);
+
+    fprintf("\n=== Saving figures to: %s ===\n", outDir);
+    savedCount = 0;
+
+    for i = 1:numel(figs)
+        fig = figs(i);
+
+        if isempty(fig) || ~isvalid(fig)
+            continue;
+        end
+
+        try
+            figure(fig);
+            drawnow;
+        catch
+            continue;
+        end
+
+        try
+            set(fig, "Color", "w");
+            set(fig, "InvertHardcopy", "off");
+            set(fig, "PaperPositionMode", "auto");
+        catch
+        end
+
+        try
+            if isprop(fig, "Name") && ~isempty(fig.Name)
+                figName = string(fig.Name);
+            else
+                figName = "Figure_" + string(i);
+            end
+        catch
+            figName = "Figure_" + string(i);
+        end
+
+        cleanName = regexprep(figName, "[^\w\d\-]+", "_");
+        cleanName = regexprep(cleanName, "_+", "_");
+        cleanName = strip(cleanName, "_");
+
+        if strlength(cleanName) == 0
+            cleanName = "Figure_" + string(i);
+        end
+
+        baseName = sprintf("%s_%02d_%s", prefix, i, cleanName);
+        basePath = fullfile(outDir, baseName);
+
+        okAny = false;
+
+        if any(formats == "png")
+            try
+                print(fig, char(basePath + ".png"), "-dpng", "-r300");
+                okAny = true;
+            catch ME
+                warning("PNG kaydi basarisiz: %s\n%s", baseName, ME.message);
+            end
+        end
+
+        if any(formats == "pdf")
+            try
+                set(fig, "Renderer", "opengl");
+                print(fig, char(basePath + ".pdf"), "-dpdf", "-bestfit");
+                okAny = true;
+            catch ME
+                warning("PDF kaydi basarisiz: %s\n%s", baseName, ME.message);
+            end
+        end
+
+        if any(formats == "fig")
+            try
+                savefig(fig, char(basePath + ".fig"));
+                okAny = true;
+            catch ME
+                warning("FIG kaydi basarisiz: %s\n%s", baseName, ME.message);
+            end
+        end
+
+        if okAny
+            savedCount = savedCount + 1;
+            fprintf("Saved: %s\n", baseName);
+        end
+    end
+
+    fprintf("=== Done. Saved %d figures. ===\n\n", savedCount);
 end

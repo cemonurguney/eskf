@@ -109,7 +109,7 @@ FINAL_FIGURES_WINDOWS_EXTRA = [
 % "never"   : GPS position + GPS velocity tum ucus boyunca kapali
 % "windows" : sadece verilen zaman pencerelerinde acik
 
-GPS_MEAS_MODE = "always";
+GPS_MEAS_MODE = "windows";
 
 % Resetlenmis sim zamani uzerinden saniye cinsinden.
 % Ornek: 120-150 s arasi GPS kesintisi.
