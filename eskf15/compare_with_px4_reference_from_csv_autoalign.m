@@ -1,39 +1,39 @@
 function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
     combined_csv_file, t, log_p, log_v, sim)
 %COMPARE_WITH_PX4_REFERENCE_FROM_CSV_AUTOALIGN
-% Combined CSV içindeki PX4 local position/velocity reference ile
-% bizim ESKF çıktısını karşılaştırır.
+% PX4 combined CSV icindeki local position / velocity referansi ile
+% bizim ESKF ciktisini karsilastirir.
 %
-% Zaman hizasını GPS izi üzerinden otomatik bulur:
-%   CSV time = ESKF reset time + tau
-%
-% Position alignment:
-%   initial-window-median-offset kullanılır.
-%   Bu sadece local-frame origin farkını düzeltir.
-%   Tüm trajectory'ye least-squares fit yapılmaz.
+% Yapilan islemler:
+%   1) CSV ve ESKF zaman eksenleri GPS izi uzerinden hizalanir.
+%   2) PX4 local position/velocity ESKF zamanlarina interpolate edilir.
+%   3) Position kiyasinda yalnizca sabit local-origin offset kaldirilir.
+%      Rotation, scale veya trajectory fit uygulanmaz.
 %
 % Not:
-%   PX4 local output mutlak truth değildir.
-%   Estimator-to-estimator consistency reference olarak kullanılır.
+%   PX4 local output mutlak truth degildir. Bu, estimator-to-estimator
+%   consistency comparison olarak kullanilir.
 
     px4_cmp = struct();
     px4_cmp.available = false;
     px4_cmp.file = combined_csv_file;
     px4_cmp.t = t;
 
-    if ~isfile(combined_csv_file)
+    if strlength(string(combined_csv_file)) == 0 || ~isfile(combined_csv_file)
         warning("Combined CSV file not found: %s", combined_csv_file);
         return;
     end
 
     %% ============================================================
-    % 0) User config
+    % 0) Final comparison config
     % ============================================================
 
-    position_alignment_mode = "initial-window-median-offset";
-    alignment_window_s = 10.0;
+    % Final alignment:
+    %   Sadece sabit local-origin offset.
+    %   Rotation/scale yok.
+    position_alignment_mode = "full-run-mean-offset";
 
-    % GPS auto alignment search ranges
+    % GPS auto-alignment search ranges
     tau_grid_coarse = -30:0.5:30;
     tau_fine_half_width_s = 2.0;
     tau_fine_step_s = 0.05;
@@ -43,7 +43,6 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
     % ============================================================
 
     Tref = readtable(combined_csv_file, "VariableNamingRule", "preserve");
-
     var_names = string(Tref.Properties.VariableNames);
 
     required_cols = [
@@ -119,7 +118,7 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
     t_csv_gps = t_csv(gps_csv_valid);
     gps_csv_data = gps_csv(:, gps_csv_valid);
 
-    fprintf("\n=== PX4/GPS AUTO ALIGNMENT ===\n");
+    fprintf("\n=== PX4/GPS TIME ALIGNMENT ===\n");
     fprintf("ESKF/sim t range : %.3f - %.3f s\n", t(1), t(end));
     fprintf("CSV t range      : %.3f - %.3f s\n", t_csv(1), t_csv(end));
     fprintf("sim GPS points   : %d\n", sum(idx_sim_gps));
@@ -171,10 +170,6 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
         end
     end
 
-    %% ============================================================
-    % 6) If search failed, force tau = 0
-    % ============================================================
-
     if ~isfinite(best_score)
         warning("Auto alignment failed. Forcing tau = 0 over common overlap.");
 
@@ -183,25 +178,6 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
         [best_score, best_offset_gps, best_valid_count] = score_gps_alignment_local( ...
             best_tau, t_sim_gps, gps_sim, t_csv_gps, gps_csv_data);
     end
-
-    %% ============================================================
-    % 7) Build best aligned GPS segment for plotting
-    % ============================================================
-
-    tq_best = t_sim_gps + best_tau;
-
-    gps_csv_best = nan(3, numel(tq_best));
-
-    for ax = 1:3
-        gps_csv_best(ax,:) = interp1( ...
-            t_csv_gps, ...
-            gps_csv_data(ax,:), ...
-            tq_best, ...
-            "linear", ...
-            nan);
-    end
-
-    valid_best_gps = all(isfinite(gps_csv_best),1) & all(isfinite(gps_sim),1);
 
     fprintf("Best CSV time offset tau [s]     : %.3f\n", best_tau);
     fprintf("GPS alignment score NE RMSE [m]  : %.3f\n", best_score);
@@ -214,7 +190,7 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
     px4_cmp.gps_alignment_valid_points = best_valid_count;
 
     %% ============================================================
-    % 8) Interpolate PX4 reference at aligned time
+    % 6) Interpolate PX4 reference at aligned time
     % ============================================================
 
     tq_all = t + best_tau;
@@ -245,7 +221,7 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
     end
 
     %% ============================================================
-    % 9) GPS schedule for split metrics
+    % 7) GPS schedule for split metrics
     % ============================================================
 
     gps_sched = true(1, numel(t));
@@ -259,74 +235,32 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
     end
 
     %% ============================================================
-    % 10) Position origin alignment, robust initial-window median
+    % 8) Position comparison with fixed local-origin offset
     % ============================================================
 
     valid_p_i = all(isfinite(px4_p_i), 1) & all(isfinite(log_p), 1);
 
     if any(valid_p_i)
 
-        first_valid = find(valid_p_i, 1, "first");
-        t0_align = t(first_valid);
-
-        init_align = valid_p_i & ...
-            (t >= t0_align) & ...
-            (t <= t0_align + alignment_window_s);
-
-        if sum(init_align) < 5
-            warning("[PX4 compare] Initial alignment window has too few samples. Falling back to first valid sample.");
-
-            offset_p = log_p(:,first_valid) - px4_p_i(:,first_valid);
-            used_alignment_mode = "first-valid-sample-offset";
-            alignment_sample_count = 1;
-
-        else
-            switch position_alignment_mode
-
-                case "initial-window-median-offset"
-                    offset_p = median( ...
-                        log_p(:,init_align) - px4_p_i(:,init_align), ...
-                        2, "omitnan");
-
-                case "initial-window-mean-offset"
-                    offset_p = mean( ...
-                        log_p(:,init_align) - px4_p_i(:,init_align), ...
-                        2, "omitnan");
-
-                case "first-sample-offset"
-                    offset_p = log_p(:,first_valid) - px4_p_i(:,first_valid);
-
-                case "gps-median-offset"
-                    offset_p = best_offset_gps;
-
-                otherwise
-                    error("Unknown position_alignment_mode: %s", position_alignment_mode);
-            end
-
-            used_alignment_mode = position_alignment_mode;
-            alignment_sample_count = sum(init_align);
-        end
+        % Sabit local-origin offset:
+        % PX4 local position referansi bizim ESKF local frame'e tasinir.
+        % Bu sadece translation'dir. Rotation/scale yoktur.
+        offset_p = mean(log_p(:,valid_p_i) - px4_p_i(:,valid_p_i), ...
+            2, "omitnan");
 
         px4_p_i_aligned = px4_p_i + offset_p;
 
-        err_p_px4_raw = log_p - px4_p_i;
         err_p_px4 = log_p - px4_p_i_aligned;
-
         valid_err_p = all(isfinite(err_p_px4), 1);
 
         valid_err_p_on  = valid_err_p & gps_sched;
         valid_err_p_off = valid_err_p & ~gps_sched;
-
-        %% All-run position metrics
-        pos_rmse_axis_raw = rmse_axis_local(err_p_px4_raw, valid_err_p);
-        pos_rmse_norm_raw = rmse_norm_local(err_p_px4_raw, valid_err_p);
 
         pos_rmse_axis = rmse_axis_local(err_p_px4, valid_err_p);
         pos_rmse_norm = rmse_norm_local(err_p_px4, valid_err_p);
         pos_mean_axis = mean_axis_local(err_p_px4, valid_err_p);
         pos_std_axis  = std_axis_local(err_p_px4, valid_err_p);
 
-        %% GPS ON/OFF position metrics
         pos_rmse_axis_on = rmse_axis_local(err_p_px4, valid_err_p_on);
         pos_rmse_norm_on = rmse_norm_local(err_p_px4, valid_err_p_on);
         pos_mean_axis_on = mean_axis_local(err_p_px4, valid_err_p_on);
@@ -335,26 +269,19 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
         pos_rmse_norm_off = rmse_norm_local(err_p_px4, valid_err_p_off);
         pos_mean_axis_off = mean_axis_local(err_p_px4, valid_err_p_off);
 
-        %% Store
         px4_cmp.available = true;
 
-        px4_cmp.position_alignment_mode = used_alignment_mode;
-        px4_cmp.position_alignment_window_s = alignment_window_s;
-        px4_cmp.position_alignment_sample_count = alignment_sample_count;
+        px4_cmp.position_alignment_mode = position_alignment_mode;
+        px4_cmp.position_alignment_type = "translation-only";
         px4_cmp.position_alignment_offset = offset_p;
+        px4_cmp.position_alignment_yaw_rad = 0;
 
-        px4_cmp.p_ref_raw = px4_p_i;
         px4_cmp.p_ref = px4_p_i_aligned;
-
-        px4_cmp.err_p_raw = err_p_px4_raw;
         px4_cmp.err_p = err_p_px4;
 
         px4_cmp.valid_err_p = valid_err_p;
         px4_cmp.valid_err_p_on = valid_err_p_on;
         px4_cmp.valid_err_p_off = valid_err_p_off;
-
-        px4_cmp.pos_rmse_axis_raw = pos_rmse_axis_raw;
-        px4_cmp.pos_rmse_norm_raw = pos_rmse_norm_raw;
 
         px4_cmp.pos_rmse_axis = pos_rmse_axis;
         px4_cmp.pos_rmse_norm = pos_rmse_norm;
@@ -369,103 +296,55 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
         px4_cmp.pos_rmse_norm_off = pos_rmse_norm_off;
         px4_cmp.pos_mean_axis_off = pos_mean_axis_off;
 
-        %% Print
-        fprintf("\n=== ESKF vs PX4 LOCAL POSITION REFERENCE ===\n");
-        fprintf("Position alignment mode          : %s\n", used_alignment_mode);
-        fprintf("Alignment window [s]             : %.3f\n", alignment_window_s);
-        fprintf("Alignment samples                : %d\n", alignment_sample_count);
-
-        fprintf("Raw Position RMSE N/E/D [m]      : [%.3f %.3f %.3f]\n", pos_rmse_axis_raw);
-        fprintf("Raw Position RMSE norm [m]       : %.3f\n", pos_rmse_norm_raw);
-
-        fprintf("Applied origin offset N/E/D [m]  : [%.3f %.3f %.3f]\n", offset_p);
-
-        fprintf("Aligned Position RMSE N/E/D [m]  : [%.3f %.3f %.3f]\n", pos_rmse_axis);
-        fprintf("Aligned Position RMSE norm [m]   : %.3f\n", pos_rmse_norm);
-        fprintf("Aligned mean error N/E/D [m]     : [%.3f %.3f %.3f]\n", pos_mean_axis);
+        fprintf("\n=== ESKF vs PX4 EKF POSITION REFERENCE ===\n");
+        fprintf("Reference comparison             : time-aligned, local-origin corrected\n");
+        fprintf("Alignment type                   : translation only, no rotation/scale\n");
+        fprintf("Position RMSE N/E/D [m]          : [%.3f %.3f %.3f]\n", pos_rmse_axis);
+        fprintf("Position RMSE norm [m]           : %.3f\n", pos_rmse_norm);
 
         if any(valid_err_p_on)
-            fprintf("Aligned Position RMSE GPS ON N/E/D [m] : [%.3f %.3f %.3f]\n", pos_rmse_axis_on);
-            fprintf("Aligned Position RMSE GPS ON norm [m]  : %.3f\n", pos_rmse_norm_on);
+            fprintf("Position RMSE GPS ON norm [m]    : %.3f\n", pos_rmse_norm_on);
         end
 
         if any(valid_err_p_off)
-            fprintf("Aligned Position RMSE GPS OFF N/E/D [m]: [%.3f %.3f %.3f]\n", pos_rmse_axis_off);
-            fprintf("Aligned Position RMSE GPS OFF norm [m] : %.3f\n", pos_rmse_norm_off);
+            fprintf("Position RMSE GPS OFF norm [m]   : %.3f\n", pos_rmse_norm_off);
         end
 
         %% Plots
-        figure('Name','PX4 Auto Alignment Check');
-        plot(gps_csv(2,gps_csv_valid), gps_csv(1,gps_csv_valid), ...
-            "Color", [0.7 0.7 0.7]);
-        hold on;
-
-        if any(valid_best_gps)
-            plot( ...
-                gps_csv_best(2,valid_best_gps) + best_offset_gps(2), ...
-                gps_csv_best(1,valid_best_gps) + best_offset_gps(1), ...
-                "b.");
-        end
-
-        plot(gps_sim(2,:), gps_sim(1,:), "r.");
-
-        grid on;
-        axis equal;
-        xlabel("East [m]");
-        ylabel("North [m]");
-        legend("Full CSV GPS", "Aligned CSV GPS segment", "sim GPS segment", ...
-            "Location", "best");
-        title(sprintf("GPS Auto Alignment, tau = %.2f s", best_tau));
-
         figure('Name','ESKF Position Error w.r.t. PX4 EKF Reference');
         hold on;
-
         shade_gps_off_regions_local(t, gps_sched);
-
         plot(t(valid_err_p), err_p_px4(1,valid_err_p), "r");
         plot(t(valid_err_p), err_p_px4(2,valid_err_p), "g");
         plot(t(valid_err_p), err_p_px4(3,valid_err_p), "b");
-
         grid on;
         xlabel("Time [s]");
-        ylabel("Position error wrt aligned PX4 ref [m]");
+        ylabel("Position error wrt PX4 ref [m]");
         legend("N", "E", "D", "Location", "best");
-        title("ESKF Position Error w.r.t. Origin-Aligned PX4 EKF Reference");
+        title("ESKF Position Error w.r.t. PX4 EKF Reference");
 
         figure('Name','Ground Track: ESKF vs PX4 Reference');
-        plot(px4_p_i(2,:), px4_p_i(1,:), ...
-            "Color", [0.5 0.5 0.5], ...
-            "LineStyle", "--", ...
-            "LineWidth", 1.0);
-        hold on;
-
         plot(px4_p_i_aligned(2,:), px4_p_i_aligned(1,:), ...
             "k--", "LineWidth", 1.2);
-
+        hold on;
         plot(log_p(2,:), log_p(1,:), ...
             "r", "LineWidth", 1.2);
-
         grid on;
         axis equal;
         xlabel("East [m]");
         ylabel("North [m]");
-        legend("PX4 raw ref", "PX4 origin-aligned ref", "Our ESKF", ...
-            "Location", "best");
+        legend("PX4 EKF reference", "Our ESKF", "Location", "best");
         title("Ground Track: ESKF vs PX4 Reference");
 
         figure('Name','Altitude: ESKF vs PX4 Reference');
         hold on;
-
         shade_gps_off_regions_local(t, gps_sched);
-
         plot(t, -px4_p_i_aligned(3,:), "k--", "LineWidth", 1.2);
         plot(t, -log_p(3,:), "r", "LineWidth", 1.2);
-
         grid on;
         xlabel("Time [s]");
         ylabel("Altitude Up [m]");
-        legend("PX4 EKF origin-aligned reference", "Our ESKF", ...
-            "Location", "best");
+        legend("PX4 EKF reference", "Our ESKF", "Location", "best");
         title("Altitude: ESKF vs PX4 Reference");
 
     else
@@ -473,7 +352,7 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
     end
 
     %% ============================================================
-    % 11) Velocity comparison
+    % 9) Velocity comparison
     % ============================================================
 
     valid_v_i = all(isfinite(px4_v_i), 1) & all(isfinite(log_v), 1);
@@ -481,7 +360,6 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
     if any(valid_v_i)
 
         err_v_px4 = log_v - px4_v_i;
-
         valid_err_v = all(isfinite(err_v_px4), 1);
 
         valid_err_v_on  = valid_err_v & gps_sched;
@@ -522,30 +400,25 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
         px4_cmp.vel_rmse_norm_off = vel_rmse_norm_off;
         px4_cmp.vel_mean_axis_off = vel_mean_axis_off;
 
-        fprintf("\n=== ESKF vs PX4 LOCAL VELOCITY REFERENCE ===\n");
+        fprintf("\n=== ESKF vs PX4 EKF VELOCITY REFERENCE ===\n");
         fprintf("Velocity RMSE N/E/D [m/s]        : [%.3f %.3f %.3f]\n", vel_rmse_axis);
         fprintf("Velocity RMSE norm [m/s]         : %.3f\n", vel_rmse_norm);
         fprintf("Velocity mean error [m/s]        : [%.3f %.3f %.3f]\n", vel_mean_axis);
 
         if any(valid_err_v_on)
-            fprintf("Velocity RMSE GPS ON N/E/D [m/s] : [%.3f %.3f %.3f]\n", vel_rmse_axis_on);
             fprintf("Velocity RMSE GPS ON norm [m/s]  : %.3f\n", vel_rmse_norm_on);
         end
 
         if any(valid_err_v_off)
-            fprintf("Velocity RMSE GPS OFF N/E/D [m/s]: [%.3f %.3f %.3f]\n", vel_rmse_axis_off);
             fprintf("Velocity RMSE GPS OFF norm [m/s] : %.3f\n", vel_rmse_norm_off);
         end
 
         figure('Name','ESKF Velocity Error w.r.t. PX4 EKF Reference');
         hold on;
-
         shade_gps_off_regions_local(t, gps_sched);
-
-        plot(t(valid_v_i), err_v_px4(1,valid_v_i), "r");
-        plot(t(valid_v_i), err_v_px4(2,valid_v_i), "g");
-        plot(t(valid_v_i), err_v_px4(3,valid_v_i), "b");
-
+        plot(t(valid_err_v), err_v_px4(1,valid_err_v), "r");
+        plot(t(valid_err_v), err_v_px4(2,valid_err_v), "g");
+        plot(t(valid_err_v), err_v_px4(3,valid_err_v), "b");
         grid on;
         xlabel("Time [s]");
         ylabel("Velocity error wrt PX4 ref [m/s]");
@@ -553,7 +426,6 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
         title("ESKF Velocity Error w.r.t. PX4 EKF Reference");
 
         figure('Name','Velocity: ESKF vs PX4 Reference');
-
         subplot(3,1,1);
         hold on;
         shade_gps_off_regions_local(t, gps_sched);
@@ -581,7 +453,6 @@ function px4_cmp = compare_with_px4_reference_from_csv_autoalign( ...
         xlabel("Time [s]");
         ylabel("V_D [m/s]");
         legend("PX4 ref", "ESKF", "Location", "best");
-
         sgtitle("Velocity: ESKF vs PX4 Reference");
 
     else
@@ -596,7 +467,6 @@ function [score, offset, valid_count] = score_gps_alignment_local( ...
     tau, t_sim_gps, gps_sim, t_csv_gps, gps_csv_data)
 
     tq = t_sim_gps + tau;
-
     gps_csv_i = nan(3, numel(tq));
 
     for ax = 1:3
@@ -617,14 +487,9 @@ function [score, offset, valid_count] = score_gps_alignment_local( ...
         return;
     end
 
-    % offset = sim GPS - CSV GPS
     offset = median(gps_sim(:,valid_i) - gps_csv_i(:,valid_i), 2, "omitnan");
-
     err_i = gps_sim(:,valid_i) - (gps_csv_i(:,valid_i) + offset);
-
-    % Time alignment score only on horizontal NE.
     score = sqrt(mean(sum(err_i(1:2,:).^2, 1), "omitnan"));
-
     valid_count = sum(valid_i);
 end
 
@@ -688,8 +553,8 @@ end
 % ============================================================
 function shade_gps_off_regions_local(t, gps_flag)
 %SHADE_GPS_OFF_REGIONS_LOCAL
-% GPS OFF bölgelerini mevcut eksende gri arka plan olarak gösterir.
-% Legend'a dahil edilmez. MATLAB'ın küçük legend krizi böyle önlenir.
+% GPS OFF bolgelerini mevcut eksende gri arka plan olarak gosterir.
+% Legend'a dahil edilmez.
 
     gps_flag = logical(gps_flag(:).');
     t = t(:).';

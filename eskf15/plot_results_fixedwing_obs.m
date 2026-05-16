@@ -74,7 +74,7 @@ function plot_results_fixedwing_obs(sim, t, log_p, log_v, log_q, ...
 
     grid on;
     xlabel('Time [s]');
-    ylabel('Altitude Up = -Down [m]');
+    ylabel('Altitude Up [m]');
     title('Altitude: ESKF vs GPS and Baro Observations');
     legend('ESKF altitude','GPS altitude','Baro altitude','Location','best');
 
